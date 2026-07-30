@@ -110,6 +110,7 @@ export default function App() {
 
   return (
     <div className="app">
+      {!HAY_NUBE ? <AvisoSinNube /> : null}
       <a className="skipLink" href="#contenido-principal">
         Saltar al contenido
       </a>
@@ -215,6 +216,21 @@ export default function App() {
       </div>
 
       <Toaster />
+    </div>
+  );
+}
+
+/** Si faltan las variables de entorno, nada se respalda. No puede pasar
+    inadvertido: es la diferencia entre tener el reporte y no tenerlo. */
+function AvisoSinNube() {
+  return (
+    <div className="bandaSinNube">
+      <Icon name="alerta" size={15} />
+      <span>
+        <strong>Modo local sin respaldo.</strong> Las entregas y firmas se guardan solo en este
+        dispositivo. Falta configurar <code className="mono">VITE_SUPABASE_URL</code> y{' '}
+        <code className="mono">VITE_SUPABASE_PUBLISHABLE_KEY</code> en el hosting.
+      </span>
     </div>
   );
 }

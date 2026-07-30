@@ -13,7 +13,17 @@ export function SyncPill({ compacto }: { compacto?: boolean }) {
   const sesion = useStore((s) => s.sesion);
   const sincronizar = useStore((s) => s.sincronizar);
 
-  if (!HAY_NUBE || !sesion) return null;
+  // Sin nube configurada nada se respalda. Es un fallo silencioso —una
+  // variable de entorno olvidada en el hosting— y tiene que verse.
+  if (!HAY_NUBE) {
+    return (
+      <span className="syncPill syncPill--off" title="Falta configurar VITE_SUPABASE_URL y VITE_SUPABASE_PUBLISHABLE_KEY">
+        <Icon name="nubeOff" size={13} />
+        Sin respaldo
+      </span>
+    );
+  }
+  if (!sesion) return null;
 
   const { pendientes, conflictos, sincronizando, enLinea, ultimaOk, ultimoError } = sync;
 
