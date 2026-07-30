@@ -1,6 +1,8 @@
 /* Catálogo de servicios sugeridos al armar un evento.
    Son plantillas: el usuario puede editarlas o crear las propias. */
 
+import type { Service } from '../types';
+
 export interface PlantillaServicio {
   nombre: string;
   icono: string;
@@ -22,6 +24,39 @@ export const PLANTILLAS_SERVICIO: PlantillaServicio[] = [
   { nombre: 'Transporte', icono: 'transporte', color: '#8FA8B8', horaDesde: '', horaHasta: '', requiereFirma: true },
   { nombre: 'Material de trabajo', icono: 'carpeta', color: '#C4A86A', horaDesde: '', horaHasta: '', requiereFirma: true },
 ];
+
+const claveServicio = (nombre: string) =>
+  nombre
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLocaleLowerCase('es');
+
+const ORDEN_OPERATIVO = new Map(
+  PLANTILLAS_SERVICIO.map((servicio, indice) => [claveServicio(servicio.nombre), indice]),
+);
+
+/**
+ * Orden cronológico estable para toda la operación.
+ * Los servicios estándar no dependen del orden en que fueron creados o descargados;
+ * los personalizados conservan su orden configurado después del catálogo.
+ */
+export function compararServiciosOperativos(
+  a: Pick<Service, 'id' | 'nombre' | 'orden'>,
+  b: Pick<Service, 'id' | 'nombre' | 'orden'>,
+): number {
+  const ordenA = ORDEN_OPERATIVO.get(claveServicio(a.nombre));
+  const ordenB = ORDEN_OPERATIVO.get(claveServicio(b.nombre));
+  const prioridadA = ordenA ?? PLANTILLAS_SERVICIO.length + a.orden;
+  const prioridadB = ordenB ?? PLANTILLAS_SERVICIO.length + b.orden;
+
+  return (
+    prioridadA - prioridadB ||
+    a.orden - b.orden ||
+    a.nombre.localeCompare(b.nombre, 'es', { sensitivity: 'base' }) ||
+    a.id.localeCompare(b.id)
+  );
+}
 
 /** Paleta de acentos disponible para servicios propios. */
 export const COLORES_SERVICIO = [

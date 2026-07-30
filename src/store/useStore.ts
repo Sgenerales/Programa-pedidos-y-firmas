@@ -8,7 +8,7 @@ import {
   tituloNombre,
   uid,
 } from '../lib/util';
-import { PLANTILLAS_SERVICIO } from '../lib/catalogo';
+import { compararServiciosOperativos, PLANTILLAS_SERVICIO } from '../lib/catalogo';
 import { compararPersonas } from './selectors';
 import { HAY_NUBE } from '../lib/config';
 import {
@@ -571,7 +571,7 @@ export const useStore = create<State>((set, get) => ({
       db.getByIndex<Delivery>('deliveries', 'eventId', id),
     ]);
     dias.sort((a, b) => a.orden - b.orden);
-    servicios.sort((a, b) => a.orden - b.orden);
+    servicios.sort(compararServiciosOperativos);
     personas.sort(compararPersonas);
     set({ eventoId: id, dias, servicios, slots, personas, entregas });
     get().setSettings({ eventoActivoId: id });
@@ -749,7 +749,9 @@ export const useStore = create<State>((set, get) => ({
     };
     await db.put('services', servicio);
     const eventos = await marcarEventoActualizado(eventId, get().eventos);
-    if (get().eventoId === eventId) set({ servicios: [...servicios, servicio], eventos });
+    if (get().eventoId === eventId) {
+      set({ servicios: [...servicios, servicio].sort(compararServiciosOperativos), eventos });
+    }
     else set({ eventos });
     void get().sincronizar({ silencioso: true });
     return servicio;
@@ -761,7 +763,9 @@ export const useStore = create<State>((set, get) => ({
     const actualizado = { ...actual, ...cambios };
     await db.put('services', actualizado);
     set({
-      servicios: get().servicios.map((s) => (s.id === id ? actualizado : s)),
+      servicios: get()
+        .servicios.map((s) => (s.id === id ? actualizado : s))
+        .sort(compararServiciosOperativos),
       eventos: await marcarEventoActualizado(actual.eventId, get().eventos),
     });
     void get().sincronizar({ silencioso: true });

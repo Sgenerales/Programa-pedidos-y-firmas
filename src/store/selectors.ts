@@ -1,4 +1,5 @@
 import { hora, matchTerms, norm } from '../lib/util';
+import { compararServiciosOperativos } from '../lib/catalogo';
 import type {
   Delivery,
   EventDay,
@@ -50,6 +51,30 @@ export function habilitadaEnTurno(persona: Person, slot: Slot): boolean {
   return slot.gruposHabilitados.includes(persona.grupo);
 }
 
+/** Turnos en el mismo orden cronológico que ve el operador. */
+export function ordenarSlotsPorServicio(slots: Slot[], servicios: Service[]): Slot[] {
+  const servicioPorId = new Map(servicios.map((servicio) => [servicio.id, servicio]));
+  return [...slots].sort((a, b) => {
+    const servicioA = servicioPorId.get(a.serviceId);
+    const servicioB = servicioPorId.get(b.serviceId);
+
+    if (servicioA && servicioB) {
+      const porServicio = compararServiciosOperativos(servicioA, servicioB);
+      if (porServicio) return porServicio;
+    } else if (servicioA) {
+      return -1;
+    } else if (servicioB) {
+      return 1;
+    }
+
+    return (
+      a.horaDesde.localeCompare(b.horaDesde) ||
+      a.horaHasta.localeCompare(b.horaHasta) ||
+      a.id.localeCompare(b.id)
+    );
+  });
+}
+
 /**
  * Arma las filas del kiosko: estado frente al turno activo + la tira de
  * la jornada (qué otros servicios de ese día ya recibió la persona).
@@ -70,12 +95,10 @@ export function filasKiosko(args: {
   }
 
   const servicioPorId = new Map(servicios.map((s) => [s.id, s]));
-  const slotsDelDia = slots
-    .filter((s) => s.dayId === slotActivo.dayId)
-    .sort(
-      (a, b) =>
-        (servicioPorId.get(a.serviceId)?.orden ?? 0) - (servicioPorId.get(b.serviceId)?.orden ?? 0),
-    );
+  const slotsDelDia = ordenarSlotsPorServicio(
+    slots.filter((s) => s.dayId === slotActivo.dayId),
+    servicios,
+  );
 
   return personas.map((person) => {
     const entrega = porSlotPersona.get(`${slotActivo.id}|${person.id}`) ?? null;

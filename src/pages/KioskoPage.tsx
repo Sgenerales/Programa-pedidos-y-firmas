@@ -11,6 +11,7 @@ import {
   filasKiosko,
   gruposDelPadron,
   asisteEnDia,
+  ordenarSlotsPorServicio,
   resumenTurno,
 } from '../store/selectors';
 import { suscribirEntregas } from '../lib/supabase';
@@ -869,7 +870,10 @@ function SelectorTurno({
     >
       <div className="col" style={{ gap: 20 }}>
         {dias.map((dia) => {
-          const delDia = slots.filter((s) => s.dayId === dia.id);
+          const delDia = ordenarSlotsPorServicio(
+            slots.filter((s) => s.dayId === dia.id),
+            servicios,
+          );
           if (!delDia.length) return null;
           return (
             <div key={dia.id}>
@@ -880,7 +884,7 @@ function SelectorTurno({
                 </span>
                 {dia.fecha === hoy ? <span className="badge badge--brass">Hoy</span> : null}
               </div>
-              <div className="grid grid--3">
+              <div className="grid grid--3 shiftPicker__grid">
                 {delDia.map((slot) => {
                   const srv = servicios.find((s) => s.id === slot.serviceId);
                   if (!srv) return null;

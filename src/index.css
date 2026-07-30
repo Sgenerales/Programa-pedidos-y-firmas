@@ -2031,6 +2031,14 @@ a {
   }
 }
 
+/* El selector operativo conserva las tres comidas en una fila en tablet horizontal. */
+@media (min-width: 821px) and (max-width: 1100px) {
+  .shiftPicker__grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+}
+
 /* Tablet en horizontal: superficie real del kiosko. */
 @media (max-width: 1024px) {
   :root {
