@@ -151,9 +151,15 @@ create table if not exists public.acta_people (
   telefono   text not null default '',
   activo     boolean not null default true,
   origen     text not null default 'importado',
+  -- Jornadas en las que asiste esta persona. null = asiste a todas, que
+  -- es el comportamiento de los padrones sin columnas de fecha.
+  dias_habilitados text[],
   creado_en  timestamptz not null default now()
 );
 create index if not exists acta_people_event_idx on public.acta_people(event_id);
+
+-- Idempotente para instalaciones anteriores a la asistencia por jornada.
+alter table public.acta_people add column if not exists dias_habilitados text[];
 
 create table if not exists public.acta_deliveries (
   id                 text primary key,

@@ -2,22 +2,24 @@ import { useMemo, useRef, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { Campo, Confirmar, Modal, Vacio } from '../components/ui';
 import { useStore } from '../store/useStore';
-import { construirIndice, buscar, gruposDelPadron } from '../store/selectors';
+import { asisteEnDia, construirIndice, buscar, gruposDelPadron } from '../store/selectors';
 import {
   construirPreview,
   detectarColumnaApellido,
+  detectarColumnasFecha,
   detectarMapeo,
   leerArchivo,
   plantillaPadron,
   type HojaLeida,
 } from '../lib/importar';
 import { exportarPadron } from '../lib/exportar';
-import { descargar } from '../lib/util';
-import type { ImportColumnMap, ImportPreviewRow, Person } from '../types';
+import { descargar, fechaCorta } from '../lib/util';
+import type { EventDay, ImportColumnMap, ImportPreviewRow, Person } from '../types';
 
 export function PadronPage({ onIrAKiosko }: { onIrAKiosko: () => void }) {
   const eventos = useStore((s) => s.eventos);
   const eventoId = useStore((s) => s.eventoId);
+  const dias = useStore((s) => s.dias);
   const personas = useStore((s) => s.personas);
   const entregas = useStore((s) => s.entregas);
   const actualizarPersona = useStore((s) => s.actualizarPersona);
@@ -71,7 +73,7 @@ export function PadronPage({ onIrAKiosko }: { onIrAKiosko: () => void }) {
               <button
                 className="btn btn--ghost"
                 onClick={async () => {
-                  const { blob, nombre } = await exportarPadron(evento, personas);
+                  const { blob, nombre } = await exportarPadron(evento, personas, dias);
                   descargar(nombre, blob);
                 }}
               >
@@ -157,14 +159,27 @@ export function PadronPage({ onIrAKiosko }: { onIrAKiosko: () => void }) {
               </button>
             </div>
 
+            {dias.length ? (
+              <div className="row row--wrap" style={{ marginBottom: 14, gap: 7 }}>
+                <span className="eyebrow">Asistencia por jornada</span>
+                {dias.map((dia) => (
+                  <span className="badge badge--info" key={dia.id}>
+                    {fechaCorta(dia.fecha)} ·{' '}
+                    {personas.filter((p) => p.activo && asisteEnDia(p, dia.id)).length}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+
             <div className="tableWrap" style={{ maxHeight: 'calc(100dvh - 300px)' }}>
               <table className="table">
                 <thead>
                   <tr>
+                    <th>Tipo</th>
+                    <th>Rol</th>
                     <th style={{ minWidth: 240 }}>Nombre</th>
                     <th>Documento</th>
-                    <th>Empresa</th>
-                    <th>Grupo</th>
+                    <th>Asistencia</th>
                     <th>Referencia</th>
                     <th className="num">Recibió</th>
                     <th style={{ width: 90 }} />
@@ -173,13 +188,14 @@ export function PadronPage({ onIrAKiosko }: { onIrAKiosko: () => void }) {
                 <tbody>
                   {visibles.map((p) => (
                     <tr key={p.id} className={p.activo ? undefined : 'dimmed'}>
+                      <td>{p.empresa || '—'}</td>
+                      <td>{p.grupo ? <span className="badge">{p.grupo}</span> : '—'}</td>
                       <td>
                         <div style={{ fontWeight: 600 }}>{p.nombre}</div>
                         {!p.activo ? <span className="badge">Inactivo</span> : null}
                       </td>
                       <td className="mono">{p.documento || '—'}</td>
-                      <td>{p.empresa || '—'}</td>
-                      <td>{p.grupo ? <span className="badge">{p.grupo}</span> : '—'}</td>
+                      <td>{textoAsistencia(p, dias)}</td>
                       <td className="muted">{p.referencia || '—'}</td>
                       <td className="num tabular">{entregasPorPersona.get(p.id) ?? 0}</td>
                       <td>
@@ -204,7 +220,7 @@ export function PadronPage({ onIrAKiosko }: { onIrAKiosko: () => void }) {
                   ))}
                   {!visibles.length ? (
                     <tr>
-                      <td colSpan={7}>
+                      <td colSpan={8}>
                         <Vacio titulo="Sin coincidencias" descripcion="Probá con otro término o quitá el filtro de grupo." />
                       </td>
                     </tr>
@@ -289,6 +305,7 @@ type Paso = 'archivo' | 'mapeo' | 'revision';
 
 function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () => void }) {
   const eventoId = useStore((s) => s.eventoId);
+  const dias = useStore((s) => s.dias);
   const personas = useStore((s) => s.personas);
   const importarPersonas = useStore((s) => s.importarPersonas);
   const toast = useStore((s) => s.toast);
@@ -341,9 +358,19 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
       colApellido,
       ordenNombre,
       padronActual: personas,
+      columnasFecha: detectarColumnasFecha(hoja.columnas, dias),
     });
-  }, [hoja, mapa, colApellido, ordenNombre, personas]);
+  }, [hoja, mapa, colApellido, ordenNombre, personas, dias]);
 
+  const columnasFecha = useMemo(
+    () => (hoja ? detectarColumnasFecha(hoja.columnas, dias) : []),
+    [hoja, dias],
+  );
+  const fechasFueraDelEvento = columnasFecha.filter((columna) => !columna.dayId);
+  const marcasInvalidas = preview.reduce(
+    (total, fila) => total + fila.asistencia.filter((marca) => marca.valor === 'invalido').length,
+    0,
+  );
   const nuevos = preview.filter((r) => r.estado === 'nuevo');
   const dupArchivo = preview.filter((r) => r.estado === 'duplicado-archivo');
   const dupPadron = preview.filter((r) => r.estado === 'duplicado-padron');
@@ -381,7 +408,11 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
             </button>
             <div className="spacer" />
             {paso === 'mapeo' ? (
-              <button className="btn btn--primary" disabled={!mapa?.nombre} onClick={() => setPaso('revision')}>
+              <button
+                className="btn btn--primary"
+                disabled={!mapa?.nombre || Boolean(fechasFueraDelEvento.length) || marcasInvalidas > 0}
+                onClick={() => setPaso('revision')}
+              >
                 Revisar {preview.length} filas
                 <Icon name="flechaDer" size={15} />
               </button>
@@ -402,6 +433,7 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
                         grupo: r.grupo,
                         referencia: r.referencia,
                         telefono: r.telefono,
+                        diasHabilitados: r.diasHabilitados,
                       })),
                     );
                     toast({
@@ -538,6 +570,36 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
             ))}
           </div>
 
+          <div
+            className={`notice ${fechasFueraDelEvento.length || marcasInvalidas ? 'notice--danger' : 'notice--info'}`}
+            style={{ marginTop: 14 }}
+          >
+            <span className="notice__icon">
+              <Icon name={fechasFueraDelEvento.length || marcasInvalidas ? 'alerta' : 'calendario'} size={16} />
+            </span>
+            <span>
+              {columnasFecha.length ? (
+                <>
+                  Se detectaron {columnasFecha.length} columnas de asistencia:{' '}
+                  {columnasFecha.map((columna, index) => (
+                    <span key={columna.columna}>
+                      {index ? ' · ' : ''}
+                      <strong>{fechaCorta(columna.fecha)}</strong>
+                      {!columna.dayId ? ' (fuera del evento)' : ''}
+                    </span>
+                  ))}
+                  . Cada <strong>SI</strong> suma a la persona en esa jornada y cada{' '}
+                  <strong>NO</strong> la excluye del total diario.
+                </>
+              ) : (
+                <>No se detectaron columnas de fecha; estas personas quedarán habilitadas todos los días.</>
+              )}
+              {marcasInvalidas
+                ? ` Hay ${marcasInvalidas} marca(s) distintas de SI/NO que deben corregirse en el archivo.`
+                : ''}
+            </span>
+          </div>
+
           <div className="card card--pad" style={{ marginTop: 14 }}>
             <div className="eyebrow" style={{ marginBottom: 10 }}>
               Nombre en dos columnas
@@ -607,6 +669,24 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
             <ResumenImport valor={sinNombre.length} etiqueta="sin nombre (se omiten)" tono="danger" />
           </div>
 
+          {columnasFecha.length ? (
+            <div className="row row--wrap" style={{ marginBottom: 14, gap: 7 }}>
+              <span className="eyebrow">Padrón por jornada</span>
+              {columnasFecha.map((columna) => (
+                <span className="badge badge--info" key={columna.columna}>
+                  {fechaCorta(columna.fecha)} ·{' '}
+                  {
+                    aImportar.filter((fila) =>
+                      fila.asistencia.some(
+                        (marca) => marca.dayId === columna.dayId && marca.valor === 'si',
+                      ),
+                    ).length
+                  }
+                </span>
+              ))}
+            </div>
+          ) : null}
+
           {dupPadron.length + dupArchivo.length > 0 ? (
             <label className="switch" style={{ marginBottom: 14 }}>
               <input
@@ -626,10 +706,10 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
             <table className="table">
               <thead>
                 <tr>
+                  <th>Tipo</th>
+                  <th>Rol</th>
                   <th>Nombre</th>
-                  <th>Documento</th>
-                  <th>Empresa</th>
-                  <th>Grupo</th>
+                  <th>Asistencia</th>
                   <th>Referencia</th>
                   <th>Estado</th>
                 </tr>
@@ -637,10 +717,14 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
               <tbody>
                 {preview.slice(0, 200).map((r, i) => (
                   <tr key={i} className={r.estado === 'nuevo' ? undefined : 'dimmed'}>
-                    <td style={{ fontWeight: 600 }}>{r.nombre || <em className="muted">sin nombre</em>}</td>
-                    <td className="mono">{r.documento || '—'}</td>
                     <td>{r.empresa || '—'}</td>
                     <td>{r.grupo || '—'}</td>
+                    <td style={{ fontWeight: 600 }}>{r.nombre || <em className="muted">sin nombre</em>}</td>
+                    <td>
+                      {r.asistencia.length
+                        ? `${r.asistencia.filter((marca) => marca.valor === 'si').length}/${r.asistencia.length} días`
+                        : 'Todos los días'}
+                    </td>
                     <td className="muted">{r.referencia || '—'}</td>
                     <td>
                       <EstadoFila estado={r.estado} />
@@ -702,6 +786,7 @@ function nuevaPersona(eventId: string): Person {
     grupo: '',
     referencia: '',
     telefono: '',
+    diasHabilitados: null,
     activo: true,
     origen: 'manual',
     creadoEn: new Date().toISOString(),
@@ -807,4 +892,11 @@ export function PersonaModal({
 
 function msg(err: unknown): string {
   return err instanceof Error ? err.message : 'Error inesperado';
+}
+
+function textoAsistencia(persona: Person, dias: EventDay[]): string {
+  if (!Array.isArray(persona.diasHabilitados)) return 'Todos los días';
+  const presentes = dias.filter((dia) => persona.diasHabilitados?.includes(dia.id)).length;
+  if (!presentes) return 'No asiste';
+  return `${presentes}/${dias.length} días`;
 }

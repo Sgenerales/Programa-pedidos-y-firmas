@@ -9,6 +9,7 @@ import {
   uid,
 } from '../lib/util';
 import { PLANTILLAS_SERVICIO } from '../lib/catalogo';
+import { compararPersonas } from './selectors';
 import { HAY_NUBE } from '../lib/config';
 import {
   bajarEntregas,
@@ -445,7 +446,7 @@ export const useStore = create<State>((set, get) => ({
     ]);
     dias.sort((a, b) => a.orden - b.orden);
     servicios.sort((a, b) => a.orden - b.orden);
-    personas.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+    personas.sort(compararPersonas);
     set({ eventoId: id, dias, servicios, slots, personas, entregas });
     get().setSettings({ eventoActivoId: id });
   },
@@ -718,15 +719,14 @@ export const useStore = create<State>((set, get) => ({
       grupo: f.grupo?.trim() ?? '',
       referencia: f.referencia?.trim() ?? '',
       telefono: f.telefono?.trim() ?? '',
+      diasHabilitados: f.diasHabilitados ?? null,
       activo: true,
       origen: 'importado',
       creadoEn: ahora,
     }));
     await db.putMany('people', nuevas);
     if (get().eventoId === eventId) {
-      const todas = [...get().personas, ...nuevas].sort((a, b) =>
-        a.nombre.localeCompare(b.nombre, 'es'),
-      );
+      const todas = [...get().personas, ...nuevas].sort(compararPersonas);
       set({ personas: todas });
     }
     return nuevas.length;
@@ -742,6 +742,7 @@ export const useStore = create<State>((set, get) => ({
       grupo: base.grupo ?? '',
       referencia: base.referencia ?? '',
       telefono: base.telefono ?? '',
+      diasHabilitados: base.diasHabilitados ?? null,
       activo: true,
       origen: base.origen ?? 'manual',
       creadoEn: new Date().toISOString(),
@@ -750,9 +751,7 @@ export const useStore = create<State>((set, get) => ({
     await db.put('people', persona);
     if (get().eventoId === eventId) {
       set({
-        personas: [...get().personas, persona].sort((a, b) =>
-          a.nombre.localeCompare(b.nombre, 'es'),
-        ),
+        personas: [...get().personas, persona].sort(compararPersonas),
       });
     }
     return persona;
@@ -766,7 +765,7 @@ export const useStore = create<State>((set, get) => ({
     set({
       personas: get()
         .personas.map((p) => (p.id === id ? actualizado : p))
-        .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es')),
+        .sort(compararPersonas),
     });
   },
 
@@ -810,6 +809,16 @@ export const useStore = create<State>((set, get) => ({
     }
     if (!persona.activo) {
       return { ok: false, motivo: 'error', mensaje: 'La persona está desactivada en el padrón.' };
+    }
+    if (
+      Array.isArray(persona.diasHabilitados) &&
+      !persona.diasHabilitados.includes(slot.dayId)
+    ) {
+      return {
+        ok: false,
+        motivo: 'error',
+        mensaje: 'La persona no figura como asistente para esta jornada.',
+      };
     }
     if (
       slot.gruposHabilitados.length &&

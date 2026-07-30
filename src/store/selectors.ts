@@ -28,9 +28,24 @@ export function buscar(indice: IndicePersona[], consulta: string): Person[] {
   return indice.filter((i) => matchTerms(i.buscable, terms)).map((i) => i.person);
 }
 
-/** ¿Esta persona está habilitada para este turno según su grupo? */
+/** Orden operativo del padrón: procedencia → rol → nombre. */
+export function compararPersonas(a: Person, b: Person): number {
+  return (
+    a.empresa.localeCompare(b.empresa, 'es', { sensitivity: 'base' }) ||
+    a.grupo.localeCompare(b.grupo, 'es', { sensitivity: 'base' }) ||
+    a.nombre.localeCompare(b.nombre, 'es', { sensitivity: 'base' })
+  );
+}
+
+/** Registros anteriores y altas manuales sin restricción asisten todos los días. */
+export function asisteEnDia(persona: Person, dayId: string): boolean {
+  return !Array.isArray(persona.diasHabilitados) || persona.diasHabilitados.includes(dayId);
+}
+
+/** ¿Esta persona está habilitada para este turno según asistencia y grupo? */
 export function habilitadaEnTurno(persona: Person, slot: Slot): boolean {
   if (!persona.activo) return false;
+  if (!asisteEnDia(persona, slot.dayId)) return false;
   if (!slot.gruposHabilitados.length) return true;
   return slot.gruposHabilitados.includes(persona.grupo);
 }

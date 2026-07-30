@@ -81,6 +81,12 @@ export interface Person {
   grupo: string;
   referencia: string;
   telefono: string;
+  /**
+   * IDs de las jornadas en las que la persona asistirá.
+   * null/undefined = sin restricción (altas manuales y registros anteriores).
+   * [] = no asiste a ninguna jornada.
+   */
+  diasHabilitados: string[] | null;
   activo: boolean;
   /** Origen: importado de planilla o alta manual en piso. */
   origen: 'importado' | 'manual';
@@ -212,6 +218,23 @@ export interface ImportPreviewRow {
   grupo: string;
   referencia: string;
   telefono: string;
+  diasHabilitados: string[] | null;
+  asistencia: ImportAttendanceMark[];
   /** 'nuevo' | 'duplicado-archivo' | 'duplicado-padron' | 'sin-nombre' */
   estado: 'nuevo' | 'duplicado-archivo' | 'duplicado-padron' | 'sin-nombre';
+}
+
+export interface ImportDateColumn {
+  columna: string;
+  /** Fecha ISO YYYY-MM-DD detectada en el encabezado. */
+  fecha: string;
+  /** ID de la jornada del evento; vacío cuando la fecha no pertenece al evento. */
+  dayId: string;
+}
+
+export interface ImportAttendanceMark {
+  columna: string;
+  fecha: string;
+  dayId: string;
+  valor: 'si' | 'no' | 'invalido';
 }

@@ -1,5 +1,11 @@
 import { norm, tituloNombre } from './util';
-import type { ImportColumnMap, ImportPreviewRow, Person } from '../types';
+import type {
+  EventDay,
+  ImportColumnMap,
+  ImportDateColumn,
+  ImportPreviewRow,
+  Person,
+} from '../types';
 
 /* SheetJS pesa ~700 KB y solo hace falta al importar o exportar. Cargarlo
    bajo demanda mantiene liviano el arranque del kiosko, que es la ruta
@@ -116,8 +122,19 @@ const PISTAS: Record<keyof ImportColumnMap, string[]> = {
     'full name',
   ],
   documento: ['documento', 'ci', 'cedula', 'dni', 'rut', 'nro documento', 'n documento', 'identificacion', 'id', 'pasaporte'],
-  empresa: ['empresa', 'organizacion', 'compania', 'institucion', 'cliente', 'proveedor', 'company'],
-  grupo: ['grupo', 'categoria', 'tipo', 'segmento', 'rol', 'perfil', 'area', 'sector', 'equipo'],
+  empresa: [
+    'empresa',
+    'tipo',
+    'procedencia',
+    'origen',
+    'organizacion',
+    'compania',
+    'institucion',
+    'cliente',
+    'proveedor',
+    'company',
+  ],
+  grupo: ['rol', 'grupo', 'categoria', 'segmento', 'perfil', 'area', 'sector', 'equipo'],
   referencia: ['unidad', 'referencia', 'oficina', 'torre', 'habitacion', 'mesa', 'ubicacion', 'sede', 'piso', 'cargo'],
   telefono: ['telefono', 'celular', 'movil', 'whatsapp', 'contacto', 'phone'],
 };
@@ -135,7 +152,20 @@ export function detectarMapeo(columnas: string[]): ImportColumnMap {
   const usadas = new Set<string>();
   const normalizadas = columnas.map((c) => ({ col: c, n: norm(c) }));
 
+  // Formato operativo de OUTLET: TIPO indica procedencia y ROL la función.
+  // Se resuelve antes del detector genérico para que ambas columnas no
+  // compitan por el mismo campo.
+  const tipo = normalizadas.find((c) => c.n === 'tipo');
+  const rol = normalizadas.find((c) => c.n === 'rol');
+  if (tipo && rol) {
+    mapa.empresa = tipo.col;
+    mapa.grupo = rol.col;
+    usadas.add(tipo.col);
+    usadas.add(rol.col);
+  }
+
   for (const campo of Object.keys(PISTAS) as (keyof ImportColumnMap)[]) {
+    if (mapa[campo]) continue;
     for (const pista of PISTAS[campo]) {
       const exacta = normalizadas.find((c) => !usadas.has(c.col) && c.n === pista);
       if (exacta) {
@@ -163,6 +193,51 @@ export function detectarMapeo(columnas: string[]): ImportColumnMap {
   return mapa;
 }
 
+/** Detecta encabezados de fecha y los vincula con las jornadas del evento. */
+export function detectarColumnasFecha(
+  columnas: string[],
+  dias: EventDay[],
+): ImportDateColumn[] {
+  const dayIdPorFecha = new Map(dias.map((dia) => [dia.fecha, dia.id]));
+  return columnas.flatMap((columna) => {
+    const fecha = fechaISODesdeEncabezado(columna);
+    return fecha
+      ? [{ columna, fecha, dayId: dayIdPorFecha.get(fecha) ?? '' }]
+      : [];
+  });
+}
+
+function fechaISODesdeEncabezado(encabezado: string): string {
+  const limpia = encabezado.trim();
+  const iso = limpia.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+  if (iso) return fechaValida(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+
+  const local = limpia.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})$/);
+  if (!local) return '';
+  const year = Number(local[3]) < 100 ? 2000 + Number(local[3]) : Number(local[3]);
+  return fechaValida(year, Number(local[2]), Number(local[1]));
+}
+
+function fechaValida(year: number, month: number, day: number): string {
+  const d = new Date(Date.UTC(year, month - 1, day));
+  if (
+    d.getUTCFullYear() !== year ||
+    d.getUTCMonth() !== month - 1 ||
+    d.getUTCDate() !== day
+  ) {
+    return '';
+  }
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/** Convierte las marcas habituales de una planilla a una decisión explícita. */
+export function interpretarAsistencia(valorCrudo: string): 'si' | 'no' | 'invalido' {
+  const valor = norm(valorCrudo);
+  if (['si', 's', 'yes', 'y', 'x', '1', 'true'].includes(valor)) return 'si';
+  if (!valor || ['no', 'n', '0', 'false'].includes(valor)) return 'no';
+  return 'invalido';
+}
+
 /**
  * Caso frecuente: apellido y nombre vienen en columnas separadas.
  * Devuelve la columna de apellido si detecta el par.
@@ -183,13 +258,23 @@ export function construirPreview(args: {
   /** 'nombre apellido' | 'apellido nombre' */
   ordenNombre?: 'nombre-apellido' | 'apellido-nombre';
   padronActual: Person[];
+  columnasFecha?: ImportDateColumn[];
 }): ImportPreviewRow[] {
-  const { filas, mapa, colApellido, ordenNombre = 'nombre-apellido', padronActual } = args;
+  const {
+    filas,
+    mapa,
+    colApellido,
+    ordenNombre = 'nombre-apellido',
+    padronActual,
+    columnasFecha = [],
+  } = args;
 
-  const clavesPadron = new Set(padronActual.map((p) => clavePersona(p.nombre, p.documento)));
+  const clavesPadron = new Set(
+    padronActual.map((p) => clavePersona(p.nombre, p.documento, p.empresa, p.grupo)),
+  );
   const clavesArchivo = new Set<string>();
 
-  return filas.map((raw) => {
+  const preview = filas.map((raw) => {
     const base = mapa.nombre ? (raw[mapa.nombre] ?? '') : '';
     const apellido = colApellido ? (raw[colApellido] ?? '') : '';
     const compuesto = apellido
@@ -200,7 +285,18 @@ export function construirPreview(args: {
 
     const nombre = tituloNombre(compuesto);
     const documento = valor(raw, mapa.documento);
-    const clave = clavePersona(nombre, documento);
+    const empresa = valor(raw, mapa.empresa);
+    const grupo = valor(raw, mapa.grupo);
+    const clave = clavePersona(nombre, documento, empresa, grupo);
+    const asistencia = columnasFecha.map((columna) => ({
+      ...columna,
+      valor: interpretarAsistencia(raw[columna.columna] ?? ''),
+    }));
+    const diasHabilitados = columnasFecha.length
+      ? asistencia
+          .filter((marca) => marca.valor === 'si' && marca.dayId)
+          .map((marca) => marca.dayId)
+      : null;
 
     let estado: ImportPreviewRow['estado'] = 'nuevo';
     if (!nombre) estado = 'sin-nombre';
@@ -212,13 +308,21 @@ export function construirPreview(args: {
       raw,
       nombre,
       documento,
-      empresa: valor(raw, mapa.empresa),
-      grupo: valor(raw, mapa.grupo),
+      empresa,
+      grupo,
       referencia: valor(raw, mapa.referencia),
       telefono: valor(raw, mapa.telefono),
+      diasHabilitados,
+      asistencia,
       estado,
     };
   });
+  return preview.sort(
+    (a, b) =>
+      a.empresa.localeCompare(b.empresa, 'es', { sensitivity: 'base' }) ||
+      a.grupo.localeCompare(b.grupo, 'es', { sensitivity: 'base' }) ||
+      a.nombre.localeCompare(b.nombre, 'es', { sensitivity: 'base' }),
+  );
 }
 
 function valor(raw: Record<string, string>, col: string): string {
@@ -226,9 +330,14 @@ function valor(raw: Record<string, string>, col: string): string {
 }
 
 /** Identidad de una persona: documento si existe, si no el nombre normalizado. */
-export function clavePersona(nombre: string, documento: string): string {
+export function clavePersona(
+  nombre: string,
+  documento: string,
+  empresa = '',
+  grupo = '',
+): string {
   const doc = documento.replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
-  return doc ? `d:${doc}` : `n:${norm(nombre)}`;
+  return doc ? `d:${doc}` : `n:${norm(nombre)}|e:${norm(empresa)}|g:${norm(grupo)}`;
 }
 
 /** Planilla modelo para que el usuario tenga el formato esperado. */

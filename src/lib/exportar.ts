@@ -212,10 +212,27 @@ function hojaFaltantes(X: XLSXMod, d: Datos): WorkSheet {
 export async function exportarPadron(
   evento: EventRecord,
   personas: Person[],
+  dias: EventDay[] = [],
 ): Promise<{ blob: Blob; nombre: string }> {
   const X = await cargarXLSX();
+
+  // Una columna por jornada con la asistencia declarada. `null` significa
+  // que la persona asiste a todas, que es el caso de los padrones sin
+  // columnas de fecha y de las altas manuales en piso.
+  const cabecera = [
+    'Nombre completo',
+    'Documento',
+    'Empresa',
+    'Grupo',
+    'Referencia',
+    'Teléfono',
+    'Estado',
+    'Origen',
+    ...dias.map((d) => `${d.etiqueta} · ${fechaCorta(d.fecha)}`),
+  ];
+
   const filas: string[][] = [
-    ['Nombre completo', 'Documento', 'Empresa', 'Grupo', 'Referencia', 'Teléfono', 'Estado', 'Origen'],
+    cabecera,
     ...personas.map((p) => [
       p.nombre,
       p.documento,
@@ -225,10 +242,13 @@ export async function exportarPadron(
       p.telefono,
       p.activo ? 'Activo' : 'Inactivo',
       p.origen === 'manual' ? 'Alta manual' : 'Importado',
+      ...dias.map((d) =>
+        !Array.isArray(p.diasHabilitados) || p.diasHabilitados.includes(d.id) ? 'Sí' : '—',
+      ),
     ]),
   ];
   const ws = X.utils.aoa_to_sheet(filas);
-  anchos(ws, [30, 14, 22, 16, 20, 16, 10, 13]);
+  anchos(ws, [30, 14, 22, 16, 20, 16, 10, 13, ...dias.map(() => 14)]);
   const wb = X.utils.book_new();
   X.utils.book_append_sheet(wb, ws, 'Padrón');
   return { blob: libroABlob(X, wb), nombre: `padron-${slugArchivo(evento.nombre)}.xlsx` };

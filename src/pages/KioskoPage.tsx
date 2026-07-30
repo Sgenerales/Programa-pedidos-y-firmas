@@ -364,6 +364,10 @@ export function KioskoPage({ onSalir }: { onSalir: () => void }) {
                 telefono: '',
                 activo: true,
                 origen: 'manual',
+                // null = asiste a todas las jornadas. Quien aparece sin
+                // estar en lista no tiene asistencia declarada, y negarle
+                // el resto del evento sería peor que habilitarlo.
+                diasHabilitados: null,
                 creadoEn: new Date().toISOString(),
               }
             : null
