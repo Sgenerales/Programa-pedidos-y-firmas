@@ -181,7 +181,7 @@ export function AjustesPage() {
                       className="input"
                       type="password"
                       value={settings.supabaseAnonKey}
-                      placeholder="eyJhbGciOi…"
+                      placeholder="sb_publishable_…"
                       onChange={(e) => {
                         reiniciarCliente();
                         setSettings({ supabaseAnonKey: e.target.value });
