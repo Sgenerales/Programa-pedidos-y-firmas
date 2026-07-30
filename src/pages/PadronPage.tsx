@@ -316,7 +316,7 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
   const [mapa, setMapa] = useState<ImportColumnMap | null>(null);
   const [colApellido, setColApellido] = useState('');
   const [ordenNombre, setOrdenNombre] = useState<'nombre-apellido' | 'apellido-nombre'>('nombre-apellido');
-  const [omitirDuplicados, setOmitirDuplicados] = useState(true);
+  const [omitirYaExistentes, setOmitirYaExistentes] = useState(true);
   const [arrastrando, setArrastrando] = useState(false);
   const [error, setError] = useState('');
   const [guardando, setGuardando] = useState(false);
@@ -328,6 +328,7 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
     setArchivo(null);
     setMapa(null);
     setColApellido('');
+    setOmitirYaExistentes(true);
     setError('');
   }
 
@@ -371,11 +372,17 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
     (total, fila) => total + fila.asistencia.filter((marca) => marca.valor === 'invalido').length,
     0,
   );
-  const nuevos = preview.filter((r) => r.estado === 'nuevo');
   const dupArchivo = preview.filter((r) => r.estado === 'duplicado-archivo');
   const dupPadron = preview.filter((r) => r.estado === 'duplicado-padron');
   const sinNombre = preview.filter((r) => r.estado === 'sin-nombre');
-  const aImportar = omitirDuplicados ? nuevos : preview.filter((r) => r.estado !== 'sin-nombre');
+  // Las coincidencias dentro del propio Excel representan filas reales de
+  // la lista y se conservan. Sólo se omiten por defecto las personas que
+  // ya estaban cargadas antes de abrir el archivo.
+  const aImportar = preview.filter(
+    (r) =>
+      r.estado !== 'sin-nombre' &&
+      (!omitirYaExistentes || r.estado !== 'duplicado-padron'),
+  );
 
   return (
     <Modal
@@ -663,11 +670,23 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
       {paso === 'revision' ? (
         <>
           <div className="grid grid--4" style={{ marginBottom: 16 }}>
-            <ResumenImport valor={nuevos.length} etiqueta="nuevas" tono="ok" />
+            <ResumenImport valor={preview.length - sinNombre.length} etiqueta="filas válidas" tono="ok" />
             <ResumenImport valor={dupPadron.length} etiqueta="ya en el padrón" tono="warn" />
-            <ResumenImport valor={dupArchivo.length} etiqueta="repetidas en el archivo" tono="warn" />
+            <ResumenImport valor={dupArchivo.length} etiqueta="coincidencias internas" tono="warn" />
             <ResumenImport valor={sinNombre.length} etiqueta="sin nombre (se omiten)" tono="danger" />
           </div>
+
+          {dupArchivo.length ? (
+            <div className="notice notice--warn" style={{ marginBottom: 14 }}>
+              <span className="notice__icon">
+                <Icon name="alerta" size={16} />
+              </span>
+              <span>
+                Hay {dupArchivo.length} fila(s) que coinciden dentro del Excel. Se conservarán para
+                respetar las {preview.length - sinNombre.length} personas de la lista original.
+              </span>
+            </div>
+          ) : null}
 
           {columnasFecha.length ? (
             <div className="row row--wrap" style={{ marginBottom: 14, gap: 7 }}>
@@ -687,17 +706,16 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
             </div>
           ) : null}
 
-          {dupPadron.length + dupArchivo.length > 0 ? (
+          {dupPadron.length > 0 ? (
             <label className="switch" style={{ marginBottom: 14 }}>
               <input
                 type="checkbox"
-                checked={omitirDuplicados}
-                onChange={(e) => setOmitirDuplicados(e.target.checked)}
+                checked={omitirYaExistentes}
+                onChange={(e) => setOmitirYaExistentes(e.target.checked)}
               />
               <span className="switch__track" />
               <span className="switch__label">
-                Omitir duplicados (recomendado). La identidad se compara por documento; si no hay
-                documento, por nombre.
+                Omitir personas que ya existen en el padrón (recomendado).
               </span>
             </label>
           ) : null}
