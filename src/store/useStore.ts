@@ -23,20 +23,31 @@ import type {
 
 const SETTINGS_KEY = 'acta.settings';
 
+const SUPABASE_URL_DEFAULT = import.meta.env.VITE_SUPABASE_URL?.trim() ?? '';
+const SUPABASE_KEY_DEFAULT = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY?.trim() ?? '';
+
 const SETTINGS_DEFAULT: DeviceSettings = {
   operador: '',
   puesto: 'Puesto 1',
   eventoActivoId: null,
   slotActivoId: null,
-  supabaseUrl: '',
-  supabaseAnonKey: '',
+  supabaseUrl: SUPABASE_URL_DEFAULT,
+  supabaseAnonKey: SUPABASE_KEY_DEFAULT,
+  supabaseEmail: '',
   syncHabilitado: false,
 };
 
 function leerSettings(): DeviceSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    return raw ? { ...SETTINGS_DEFAULT, ...JSON.parse(raw) } : { ...SETTINGS_DEFAULT };
+    if (!raw) return { ...SETTINGS_DEFAULT };
+    const guardado = JSON.parse(raw) as Partial<DeviceSettings>;
+    return {
+      ...SETTINGS_DEFAULT,
+      ...guardado,
+      supabaseUrl: guardado.supabaseUrl?.trim() || SUPABASE_URL_DEFAULT,
+      supabaseAnonKey: guardado.supabaseAnonKey?.trim() || SUPABASE_KEY_DEFAULT,
+    };
   } catch {
     return { ...SETTINGS_DEFAULT };
   }

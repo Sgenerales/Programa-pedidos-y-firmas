@@ -61,6 +61,15 @@ export function KioskoPage({ onSalir }: { onSalir: () => void }) {
     if (!eventoId || !settings.syncHabilitado) return;
     const sub = await subirEntregas(settings, eventoId);
     const baj = await bajarEntregas(settings, eventoId);
+    const errorSync = sub.mensaje ?? baj.mensaje;
+    if (errorSync) {
+      toast({
+        tipo: 'error',
+        titulo: 'No se pudo sincronizar',
+        detalle: errorSync,
+      });
+      return;
+    }
     if (sub.conflictos.length) {
       toast({
         tipo: 'error',

@@ -2,7 +2,16 @@ import { useEffect, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { Campo, Interruptor } from '../components/ui';
 import { useStore } from '../store/useStore';
-import { probarConexion, reiniciarCliente, subirEstructura, subirEntregas } from '../lib/supabase';
+import {
+  cerrarSesion,
+  iniciarSesion,
+  obtenerEstadoSesion,
+  probarConexion,
+  reiniciarCliente,
+  subirEstructura,
+  subirEntregas,
+  type EstadoSesion,
+} from '../lib/supabase';
 import { bytes, describirDispositivo } from '../lib/util';
 import * as db from '../lib/idb';
 
@@ -21,10 +30,21 @@ export function AjustesPage() {
   const [probando, setProbando] = useState(false);
   const [resultado, setResultado] = useState<{ ok: boolean; mensaje: string } | null>(null);
   const [subiendo, setSubiendo] = useState(false);
+  const [claveSesion, setClaveSesion] = useState('');
+  const [autenticando, setAutenticando] = useState(false);
+  const [sesion, setSesion] = useState<EstadoSesion>({ autenticado: false });
 
   useEffect(() => {
     void db.estimateUsage().then(setUso);
   }, []);
+
+  useEffect(() => {
+    if (!settings.syncHabilitado || !settings.supabaseUrl || !settings.supabaseAnonKey) {
+      setSesion({ autenticado: false });
+      return;
+    }
+    void obtenerEstadoSesion(settings).then(setSesion);
+  }, [settings.syncHabilitado, settings.supabaseUrl, settings.supabaseAnonKey]);
 
   const evento = eventos.find((e) => e.id === eventoId) ?? null;
 
@@ -156,7 +176,7 @@ export function AjustesPage() {
                       }}
                     />
                   </Campo>
-                  <Campo etiqueta="Clave anónima (anon key)" ayuda="Nunca uses la service_role acá.">
+                  <Campo etiqueta="Clave publicable" ayuda="Nunca uses la service_role acá.">
                     <input
                       className="input"
                       type="password"
@@ -170,10 +190,105 @@ export function AjustesPage() {
                   </Campo>
                 </div>
 
+                <div className="grid grid--2" style={{ marginTop: 14 }}>
+                  <Campo etiqueta="Correo autorizado" ayuda="Usuario creado en Supabase Auth.">
+                    <input
+                      className="input"
+                      type="email"
+                      autoComplete="username"
+                      value={settings.supabaseEmail}
+                      placeholder="tablet@tu-organizacion.com"
+                      onChange={(e) => setSettings({ supabaseEmail: e.target.value })}
+                    />
+                  </Campo>
+                  <Campo
+                    etiqueta="Contraseña"
+                    ayuda="Solo se usa para iniciar sesión; ACTA no la guarda."
+                  >
+                    <input
+                      className="input"
+                      type="password"
+                      autoComplete="current-password"
+                      value={claveSesion}
+                      placeholder="Contraseña del usuario"
+                      onChange={(e) => setClaveSesion(e.target.value)}
+                    />
+                  </Campo>
+                </div>
+
+                <div
+                  className={`notice ${sesion.autenticado ? 'notice--info' : 'notice--warn'}`}
+                  style={{ marginTop: 14 }}
+                >
+                  <span className="notice__icon">
+                    <Icon name={sesion.autenticado ? 'sello' : 'alerta'} size={16} />
+                  </span>
+                  <span>
+                    {sesion.autenticado
+                      ? `Sesión segura activa${sesion.email ? `: ${sesion.email}` : ''}.`
+                      : sesion.mensaje ?? 'Este puesto todavía no inició sesión.'}
+                  </span>
+                </div>
+
                 <div className="row" style={{ marginTop: 16, gap: 9 }}>
+                  {sesion.autenticado ? (
+                    <button
+                      className="btn btn--ghost"
+                      disabled={autenticando}
+                      onClick={async () => {
+                        setAutenticando(true);
+                        const res = await cerrarSesion(settings);
+                        setAutenticando(false);
+                        if (!res.ok) {
+                          setResultado({
+                            ok: false,
+                            mensaje: res.mensaje ?? 'No se pudo cerrar sesión.',
+                          });
+                          return;
+                        }
+                        setSesion({ autenticado: false });
+                        setResultado({ ok: true, mensaje: 'Sesión cerrada en este puesto.' });
+                      }}
+                    >
+                      <Icon name="x" size={15} />
+                      Cerrar sesión
+                    </button>
+                  ) : (
+                    <button
+                      className="btn btn--primary"
+                      disabled={
+                        autenticando ||
+                        !settings.supabaseEmail.trim() ||
+                        !claveSesion ||
+                        !settings.supabaseUrl.trim() ||
+                        !settings.supabaseAnonKey.trim()
+                      }
+                      onClick={async () => {
+                        setAutenticando(true);
+                        const estado = await iniciarSesion(
+                          settings,
+                          settings.supabaseEmail,
+                          claveSesion,
+                        );
+                        setClaveSesion('');
+                        setSesion(estado);
+                        setResultado({
+                          ok: estado.autenticado,
+                          mensaje: estado.autenticado
+                            ? 'Sesión segura iniciada. Ya podés probar la conexión.'
+                            : estado.mensaje ?? 'No se pudo iniciar sesión.',
+                        });
+                        setAutenticando(false);
+                      }}
+                    >
+                      <Icon name="sello" size={15} />
+                      {autenticando ? 'Ingresando…' : 'Iniciar sesión segura'}
+                    </button>
+                  )}
+
                   <button
                     className="btn btn--ghost"
-                    disabled={probando}
+                    disabled={probando || !sesion.autenticado}
                     onClick={async () => {
                       setProbando(true);
                       setResultado(await probarConexion(settings));
@@ -186,7 +301,7 @@ export function AjustesPage() {
 
                   <button
                     className="btn btn--ghost"
-                    disabled={!evento || subiendo}
+                    disabled={!evento || subiendo || !sesion.autenticado}
                     onClick={async () => {
                       if (!evento) return;
                       setSubiendo(true);
@@ -233,9 +348,10 @@ export function AjustesPage() {
                     <Icon name="info" size={16} />
                   </span>
                   <span>
-                    Ejecutá <code className="mono">supabase/schema.sql</code> en tu proyecto antes de
-                    publicar. La restricción única <code className="mono">(slot_id, person_id)</code>{' '}
-                    es la que evita que dos puestos registren a la misma persona en el mismo turno.
+                    La nube solo acepta usuarios habilitados en{' '}
+                    <code className="mono">acta_members</code>. La restricción única{' '}
+                    <code className="mono">(slot_id, person_id)</code> evita que dos puestos
+                    registren a la misma persona en el mismo turno.
                   </span>
                 </div>
               </>

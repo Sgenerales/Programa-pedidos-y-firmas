@@ -20,19 +20,24 @@ import type {
    ═══════════════════════════════════════════════════════════════════ */
 
 let cliente: SupabaseClient | null = null;
-let clienteUrl = '';
+let clienteCredencial = '';
 
 /** El SDK solo se descarga si la sincronización está realmente activa. */
 export async function obtenerCliente(s: DeviceSettings): Promise<SupabaseClient | null> {
   if (!s.syncHabilitado || !s.supabaseUrl || !s.supabaseAnonKey) return null;
-  if (cliente && clienteUrl === s.supabaseUrl) return cliente;
+  const credencial = `${s.supabaseUrl.trim()}|${s.supabaseAnonKey.trim()}`;
+  if (cliente && clienteCredencial === credencial) return cliente;
   try {
     const { createClient } = await import('@supabase/supabase-js');
     cliente = createClient(s.supabaseUrl.trim(), s.supabaseAnonKey.trim(), {
-      auth: { persistSession: false },
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: false,
+      },
       realtime: { params: { eventsPerSecond: 5 } },
     });
-    clienteUrl = s.supabaseUrl;
+    clienteCredencial = credencial;
     return cliente;
   } catch {
     return null;
@@ -41,7 +46,52 @@ export async function obtenerCliente(s: DeviceSettings): Promise<SupabaseClient 
 
 export function reiniciarCliente(): void {
   cliente = null;
-  clienteUrl = '';
+  clienteCredencial = '';
+}
+
+export interface EstadoSesion {
+  autenticado: boolean;
+  email?: string;
+  mensaje?: string;
+}
+
+/** Devuelve la sesión persistida del dispositivo sin solicitar credenciales otra vez. */
+export async function obtenerEstadoSesion(s: DeviceSettings): Promise<EstadoSesion> {
+  const c = await obtenerCliente({ ...s, syncHabilitado: true });
+  if (!c) return { autenticado: false, mensaje: 'Faltan la URL o la clave publicable.' };
+  const { data, error } = await c.auth.getSession();
+  if (error) return { autenticado: false, mensaje: error.message };
+  return {
+    autenticado: Boolean(data.session),
+    email: data.session?.user.email ?? undefined,
+  };
+}
+
+/** Inicia Supabase Auth sin persistir la contraseña en la configuración local. */
+export async function iniciarSesion(
+  s: DeviceSettings,
+  email: string,
+  password: string,
+): Promise<EstadoSesion> {
+  const c = await obtenerCliente({ ...s, syncHabilitado: true });
+  if (!c) return { autenticado: false, mensaje: 'Faltan la URL o la clave publicable.' };
+  const { data, error } = await c.auth.signInWithPassword({
+    email: email.trim(),
+    password,
+  });
+  if (error) return { autenticado: false, mensaje: error.message };
+  return {
+    autenticado: Boolean(data.session),
+    email: data.user?.email ?? email.trim(),
+  };
+}
+
+export async function cerrarSesion(s: DeviceSettings): Promise<{ ok: boolean; mensaje?: string }> {
+  const c = await obtenerCliente({ ...s, syncHabilitado: true });
+  if (!c) return { ok: false, mensaje: 'Faltan la URL o la clave publicable.' };
+  const { error } = await c.auth.signOut();
+  if (error) return { ok: false, mensaje: error.message };
+  return { ok: true };
 }
 
 export interface ResultadoSync {
@@ -54,18 +104,43 @@ export interface ResultadoSync {
 /** Verifica credenciales y presencia de las tablas requeridas. */
 export async function probarConexion(s: DeviceSettings): Promise<{ ok: boolean; mensaje: string }> {
   const c = await obtenerCliente({ ...s, syncHabilitado: true });
-  if (!c) return { ok: false, mensaje: 'Faltan la URL o la clave anónima.' };
+  if (!c) return { ok: false, mensaje: 'Faltan la URL o la clave publicable.' };
+  const { data: sesion, error: errorSesion } = await c.auth.getSession();
+  if (errorSesion) return { ok: false, mensaje: errorSesion.message };
+  if (!sesion.session) {
+    return { ok: false, mensaje: 'La conexión responde, pero este puesto aún no inició sesión.' };
+  }
+  const { data: membresia, error: errorMembresia } = await c
+    .from('acta_members')
+    .select('user_id, role, activo')
+    .eq('user_id', sesion.session.user.id)
+    .maybeSingle();
+  if (errorMembresia) {
+    return {
+      ok: false,
+      mensaje:
+        errorMembresia.code === '42P01' || errorMembresia.code === 'PGRST205'
+          ? 'Conectó, pero faltan las tablas. Ejecutá la migración segura de Supabase.'
+          : errorMembresia.message,
+    };
+  }
+  if (!membresia?.activo) {
+    return { ok: false, mensaje: 'El usuario inició sesión, pero no está autorizado para ACTA.' };
+  }
   const { error } = await c.from('acta_deliveries').select('id').limit(1);
   if (error) {
     return {
       ok: false,
       mensaje:
-        error.code === '42P01'
-          ? 'Conectó, pero faltan las tablas. Ejecutá supabase/schema.sql en el proyecto.'
+        error.code === '42P01' || error.code === 'PGRST205'
+          ? 'Conectó, pero faltan las tablas. Ejecutá la migración segura de Supabase.'
           : error.message,
     };
   }
-  return { ok: true, mensaje: 'Conexión verificada. Las tablas responden.' };
+  return {
+    ok: true,
+    mensaje: `Conexión segura verificada como ${sesion.session.user.email ?? 'usuario autorizado'}.`,
+  };
 }
 
 /* ─── Subida ─────────────────────────────────────────────────────── */
@@ -138,6 +213,8 @@ export async function subirEntregas(
           con_firma: entrega.conFirma,
           firma_png: firma?.png ?? null,
           firma_trazos: firma?.trazos ?? null,
+          firma_ancho: firma?.ancho ?? null,
+          firma_alto: firma?.alto ?? null,
           firmado_en: entrega.firmadoEn,
           operador: entrega.operador,
           dispositivo: entrega.dispositivo,
@@ -156,6 +233,25 @@ export async function subirEntregas(
       if (error.code === '23505') {
         conflictos.push(entrega);
         continue;
+      }
+      // 23503 = el turno o la persona todavía no existen en la nube: el
+      // evento nunca se publicó. Es el error más probable al empezar, y
+      // el mensaje crudo de Postgres no le dice nada al operador.
+      if (error.code === '23503') {
+        return {
+          subidas,
+          conflictos,
+          mensaje:
+            'Este evento todavía no está publicado en la nube. Andá a Ajustes → «Publicar evento actual» y volvé a intentar.',
+        };
+      }
+      // 42501 / PGRST301 = el usuario entró pero no tiene permiso de escritura.
+      if (error.code === '42501' || error.code === 'PGRST301') {
+        return {
+          subidas,
+          conflictos,
+          mensaje: 'Este usuario no tiene permiso para registrar entregas (rol «auditor» o inactivo).',
+        };
       }
       return { subidas, conflictos, mensaje: error.message };
     }
@@ -204,8 +300,8 @@ export async function bajarEntregas(
         eventId,
         png,
         trazos: (fila['firma_trazos'] as never) ?? [],
-        ancho: 600,
-        alto: 240,
+        ancho: Number(fila['firma_ancho']) || 600,
+        alto: Number(fila['firma_alto']) || 240,
       });
     }
   }

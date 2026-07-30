@@ -94,15 +94,41 @@ y quedan en el acta tachadas, nunca se borran.
 Solo hace falta si operás con dos o más puestos en el mismo turno y querés que se
 vean entre sí en tiempo real.
 
-1. Ejecutá `supabase/schema.sql` en tu proyecto de Supabase.
-2. En **Ajustes**, activá la sincronización y pegá la URL y la **anon key**
-   (nunca la `service_role`).
-3. Probá la conexión y publicá el evento.
+1. Ejecutá `supabase/schema.sql` en el SQL Editor o aplicá la migración incluida.
+2. Creá los usuarios de cada tablet en **Authentication → Users**.
+3. Autorizá cada usuario en una transacción:
+
+   ```sql
+   begin;
+
+   insert into public.acta_members (user_id, email, role)
+   select id, email, 'operator'
+   from auth.users
+   where lower(email) = lower('tablet@tu-organizacion.com')
+   on conflict (user_id) do update
+     set email = excluded.email,
+         role = excluded.role,
+         activo = true;
+
+   commit;
+
+   select user_id, email, role, activo
+   from public.acta_members
+   where lower(email) = lower('tablet@tu-organizacion.com');
+   ```
+
+   Usá `admin` para quienes deban eliminar datos, `operator` para los puestos
+   y `auditor` para cuentas de solo lectura.
+4. En **Ajustes**, activá la sincronización, cargá la URL y la **publishable
+   key** (nunca la `service_role`) e iniciá sesión con el usuario autorizado.
+5. Probá la conexión y publicá el evento.
 
 El SDK de Supabase solo se descarga si la sincronización está activa. Las
-políticas RLS del script son permisivas a propósito, asumiendo una red
-controlada durante el evento; si el proyecto es compartido, reemplazalas por
-políticas basadas en `auth.uid()`.
+políticas RLS bloquean por completo a usuarios anónimos. Los miembros activos
+pueden leer, los roles `admin` y `operator` pueden registrar o modificar
+entregas, y solamente `admin` puede eliminar datos. La contraseña nunca se
+guarda en la configuración de ACTA; Supabase conserva una sesión renovable por
+dispositivo.
 
 ---
 

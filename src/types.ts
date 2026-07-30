@@ -152,6 +152,8 @@ export interface DeviceSettings {
   slotActivoId: string | null;
   supabaseUrl: string;
   supabaseAnonKey: string;
+  /** Correo del usuario autorizado de Supabase Auth. La contraseña nunca se persiste. */
+  supabaseEmail: string;
   syncHabilitado: boolean;
 }
 
