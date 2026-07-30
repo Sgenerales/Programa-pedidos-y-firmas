@@ -1,8 +1,8 @@
 /* ═══════════════════════════════════════════════════════════════════
-   Capa de persistencia local (IndexedDB)
+   Caché offline del dispositivo (IndexedDB)
    ───────────────────────────────────────────────────────────────────
-   Sin dependencias. La app es local-first: todo se escribe acá primero
-   y recién después, si hay Supabase configurado, se replica.
+   Las operaciones se escriben primero acá para resistir cortes de red.
+   Supabase es la fuente compartida y el motor reconcilia esta caché.
    ═══════════════════════════════════════════════════════════════════ */
 
 export const DB_NAME = 'acta-entregas';

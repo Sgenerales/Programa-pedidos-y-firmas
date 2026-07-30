@@ -75,7 +75,8 @@ export function AjustesPage() {
             <div>
               <h2 className="section__title">Almacenamiento local</h2>
               <p className="section__desc">
-                Todo vive en esta tablet. La app funciona completa sin conexión; la nube es opcional.
+                Esta tablet conserva una caché offline. Supabase es la base compartida y reconcilia
+                eventos, padrón, turnos, entregas y firmas entre todos los dispositivos.
               </p>
             </div>
           </div>
@@ -116,8 +117,8 @@ export function AjustesPage() {
             <div>
               <h2 className="section__title">Cuenta y respaldo en la nube</h2>
               <p className="section__desc">
-                Cada entrega y cada firma se suben acá. Es lo que alimenta los reportes y lo que
-                permite que dos tablets se vean entre sí.
+                Todos los cambios se publican acá. La copia local permite continuar si se corta la
+                red y se actualiza nuevamente cuando vuelve la conexión.
               </p>
             </div>
           </div>

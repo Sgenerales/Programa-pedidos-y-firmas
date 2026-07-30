@@ -12,7 +12,7 @@ import { PLANTILLAS_SERVICIO } from '../lib/catalogo';
 import { compararPersonas } from './selectors';
 import { HAY_NUBE } from '../lib/config';
 import {
-  bajarEstructurasFaltantes,
+  bajarEstructuras,
   bajarEntregas,
   cerrarSesion as cerrarSesionNube,
   eliminarEstructura,
@@ -197,23 +197,91 @@ async function leerEstructuraDeDisco(eventId: string): Promise<DatosEvento | nul
   return { evento, dias, servicios, slots, personas };
 }
 
-async function incorporarEstructurasRemotas(
+async function reemplazarColeccionLocal<T extends { id: string; eventId: string }>(
+  store: 'days' | 'services' | 'slots' | 'people',
+  eventId: string,
+  filas: T[],
+): Promise<void> {
+  const actuales = await db.getByIndex<T>(store, 'eventId', eventId);
+  const remotos = new Set(filas.map((fila) => fila.id));
+  await db.removeMany(
+    store,
+    actuales.filter((fila) => !remotos.has(fila.id)).map((fila) => fila.id),
+  );
+  await db.putMany(store, filas);
+}
+
+/**
+ * Supabase es la fuente compartida; IndexedDB funciona como caché offline.
+ * Si ambos lados cambiaron, gana la estructura con `actualizadoEn` más nuevo.
+ */
+async function reconciliarEstructurasRemotas(
   eventosLocales: EventRecord[],
 ): Promise<EventRecord[]> {
-  const remota = await bajarEstructurasFaltantes(eventosLocales.map((evento) => evento.id));
-  if (!remota.eventos.length) return eventosLocales;
+  const remota = await bajarEstructuras();
+  const locales = new Map(eventosLocales.map((evento) => [evento.id, evento]));
+  const eliminados = new Set(remota.eliminados);
+  const huellas = leerHuellas();
+  const resultado: EventRecord[] = [];
 
-  await Promise.all([
-    db.putMany('events', remota.eventos),
-    db.putMany('days', remota.dias),
-    db.putMany('services', remota.servicios),
-    db.putMany('slots', remota.slots),
-    db.putMany('people', remota.personas),
-  ]);
+  for (const eventId of eliminados) {
+    if (locales.has(eventId)) await db.purgeEvent(eventId);
+    locales.delete(eventId);
+  }
 
-  return [...remota.eventos, ...eventosLocales].sort((a, b) =>
-    b.actualizadoEn.localeCompare(a.actualizadoEn),
-  );
+  for (const eventoRemoto of remota.eventos) {
+    if (eliminados.has(eventoRemoto.id)) continue;
+    const local = locales.get(eventoRemoto.id);
+    const datosRemotos: DatosEvento = {
+      evento: eventoRemoto,
+      dias: remota.dias.filter((fila) => fila.eventId === eventoRemoto.id),
+      servicios: remota.servicios.filter((fila) => fila.eventId === eventoRemoto.id),
+      slots: remota.slots.filter((fila) => fila.eventId === eventoRemoto.id),
+      personas: remota.personas.filter((fila) => fila.eventId === eventoRemoto.id),
+    };
+
+    let conservarRemoto = !local;
+    if (local) {
+      const datosLocales = await leerEstructuraDeDisco(local.id);
+      const huellaLocal = datosLocales ? huellaEstructura(datosLocales) : '';
+      const localCambio = huellas[local.id] !== huellaLocal;
+      conservarRemoto =
+        eventoRemoto.actualizadoEn > local.actualizadoEn ||
+        (!localCambio && huellaEstructura(datosRemotos) !== huellaLocal);
+    }
+
+    if (conservarRemoto) {
+      await db.put('events', eventoRemoto);
+      await reemplazarColeccionLocal('days', eventoRemoto.id, datosRemotos.dias);
+      await reemplazarColeccionLocal('services', eventoRemoto.id, datosRemotos.servicios);
+      await reemplazarColeccionLocal('slots', eventoRemoto.id, datosRemotos.slots);
+      await reemplazarColeccionLocal('people', eventoRemoto.id, datosRemotos.personas);
+      guardarHuella(eventoRemoto.id, huellaEstructura(datosRemotos));
+      resultado.push(eventoRemoto);
+    } else {
+      resultado.push(local!);
+    }
+    locales.delete(eventoRemoto.id);
+  }
+
+  // La ausencia no equivale a borrado: podría ser una caché creada sin red o
+  // una lectura limitada por permisos. Solo un tombstone autoriza purgarla.
+  for (const eventoLocal of locales.values()) {
+    resultado.push(eventoLocal);
+  }
+
+  return resultado.sort((a, b) => b.actualizadoEn.localeCompare(a.actualizadoEn));
+}
+
+async function marcarEventoActualizado(
+  eventId: string,
+  eventos: EventRecord[],
+): Promise<EventRecord[]> {
+  const actual = eventos.find((evento) => evento.id === eventId);
+  if (!actual) return eventos;
+  const actualizado = { ...actual, actualizadoEn: new Date().toISOString() };
+  await db.put('events', actualizado);
+  return eventos.map((evento) => (evento.id === eventId ? actualizado : evento));
 }
 
 export interface Toast {
@@ -336,7 +404,7 @@ export const useStore = create<State>((set, get) => ({
       });
       if (sesion) {
         try {
-          eventos = await incorporarEstructurasRemotas(eventos);
+          eventos = await reconciliarEstructurasRemotas(eventos);
           set({ eventos });
         } catch (err) {
           set({
@@ -366,7 +434,7 @@ export const useStore = create<State>((set, get) => ({
     guardarSettings(next);
     set({ sesion: res.sesion, settings: next, sesionVerificada: true });
     try {
-      const eventos = await incorporarEstructurasRemotas(get().eventos);
+      const eventos = await reconciliarEstructurasRemotas(get().eventos);
       set({ eventos });
     } catch (err) {
       set({
@@ -422,24 +490,35 @@ export const useStore = create<State>((set, get) => ({
       // Barremos todos los eventos con entregas pendientes, no solo el
       // que está abierto. Cambiar de evento no puede dejar firmas
       // varadas fuera del reporte.
+      const eventos = await reconciliarEstructurasRemotas(get().eventos);
+      set({ eventos });
+      if (eventoId && eventos.some((evento) => evento.id === eventoId)) {
+        await get().cargarEvento(eventoId);
+      } else if (eventoId) {
+        await get().cargarEvento(null);
+      }
+
       const todas = await db.getAll<Delivery>('deliveries');
-      const objetivos = new Set(todas.filter((e) => e.sync === 'pendiente').map((e) => e.eventId));
+      const objetivos = new Set(eventos.map((evento) => evento.id));
+      for (const entrega of todas.filter((fila) => fila.sync === 'pendiente')) {
+        objetivos.add(entrega.eventId);
+      }
       // El evento abierto entra siempre, aunque no deba nada: es el que
       // necesita bajar lo que registraron los otros puestos.
-      if (eventoId) objetivos.add(eventoId);
+      if (get().eventoId) objetivos.add(get().eventoId!);
 
       let error: string | null = null;
       let conflictos = 0;
       let cambios = 0;
 
       for (const id of objetivos) {
-        const r = await sincronizarEvento(id, id === eventoId ? get() : null);
+        const r = await sincronizarEvento(id, id === get().eventoId ? get() : null);
         conflictos += r.conflictos;
         cambios += r.cambios;
         if (r.mensaje && !error) error = r.mensaje;
       }
 
-      if (cambios && eventoId) await get().cargarEvento(eventoId);
+      if (cambios && get().eventoId) await get().cargarEvento(get().eventoId);
       await get().refrescarPendientes();
 
       // Una sesión vencida no se arregla reintentando: hay que volver a
@@ -520,6 +599,7 @@ export const useStore = create<State>((set, get) => ({
     await db.put('events', evento);
     set({ eventos: [evento, ...get().eventos] });
     await get().sincronizarDias(evento.id, evento.fechaInicio, evento.fechaFin);
+    await get().sincronizar({ silencioso: true });
     return evento;
   },
 
@@ -544,6 +624,7 @@ export const useStore = create<State>((set, get) => ({
     if (cambios.fechaInicio || cambios.fechaFin) {
       await get().sincronizarDias(id, actualizado.fechaInicio, actualizado.fechaFin);
     }
+    void get().sincronizar({ silencioso: true });
   },
 
   async duplicarEvento(id, nombre) {
@@ -591,6 +672,7 @@ export const useStore = create<State>((set, get) => ({
     await db.putMany('services', nuevosServicios);
     await db.putMany('slots', nuevosSlots);
     set({ eventos: [nuevo, ...get().eventos] });
+    await get().sincronizar({ silencioso: true });
     return nuevo.id;
   },
 
@@ -646,7 +728,11 @@ export const useStore = create<State>((set, get) => ({
     if (!dia) return;
     const actualizado = { ...dia, etiqueta };
     await db.put('days', actualizado);
-    set({ dias: get().dias.map((d) => (d.id === dayId ? actualizado : d)) });
+    set({
+      dias: get().dias.map((d) => (d.id === dayId ? actualizado : d)),
+      eventos: await marcarEventoActualizado(dia.eventId, get().eventos),
+    });
+    void get().sincronizar({ silencioso: true });
   },
 
   async agregarServicio(eventId, base) {
@@ -662,7 +748,10 @@ export const useStore = create<State>((set, get) => ({
       orden: servicios.length,
     };
     await db.put('services', servicio);
-    if (get().eventoId === eventId) set({ servicios: [...servicios, servicio] });
+    const eventos = await marcarEventoActualizado(eventId, get().eventos);
+    if (get().eventoId === eventId) set({ servicios: [...servicios, servicio], eventos });
+    else set({ eventos });
+    void get().sincronizar({ silencioso: true });
     return servicio;
   },
 
@@ -671,10 +760,16 @@ export const useStore = create<State>((set, get) => ({
     if (!actual) return;
     const actualizado = { ...actual, ...cambios };
     await db.put('services', actualizado);
-    set({ servicios: get().servicios.map((s) => (s.id === id ? actualizado : s)) });
+    set({
+      servicios: get().servicios.map((s) => (s.id === id ? actualizado : s)),
+      eventos: await marcarEventoActualizado(actual.eventId, get().eventos),
+    });
+    void get().sincronizar({ silencioso: true });
   },
 
   async eliminarServicio(id) {
+    const actual = get().servicios.find((servicio) => servicio.id === id);
+    if (!actual) return;
     const slots = get().slots.filter((s) => s.serviceId === id);
     const entregas = get().entregas.filter((e) => slots.some((s) => s.id === e.slotId));
     if (entregas.length) {
@@ -687,7 +782,9 @@ export const useStore = create<State>((set, get) => ({
     set({
       servicios: get().servicios.filter((s) => s.id !== id),
       slots: get().slots.filter((s) => s.serviceId !== id),
+      eventos: await marcarEventoActualizado(actual.eventId, get().eventos),
     });
+    void get().sincronizar({ silencioso: true });
   },
 
   async alternarTurno(eventId, dayId, serviceId) {
@@ -702,6 +799,8 @@ export const useStore = create<State>((set, get) => ({
       if (get().settings.slotActivoId === existente.id) {
         get().setSettings({ slotActivoId: null });
       }
+      set({ eventos: await marcarEventoActualizado(eventId, get().eventos) });
+      void get().sincronizar({ silencioso: true });
       return;
     }
     const plantilla = PLANTILLAS_SERVICIO.find(
@@ -717,7 +816,11 @@ export const useStore = create<State>((set, get) => ({
       gruposHabilitados: [],
     };
     await db.put('slots', slot);
-    set({ slots: [...get().slots, slot] });
+    set({
+      slots: [...get().slots, slot],
+      eventos: await marcarEventoActualizado(eventId, get().eventos),
+    });
+    void get().sincronizar({ silencioso: true });
   },
 
   async actualizarTurno(id, cambios) {
@@ -725,7 +828,11 @@ export const useStore = create<State>((set, get) => ({
     if (!actual) return;
     const actualizado = { ...actual, ...cambios };
     await db.put('slots', actualizado);
-    set({ slots: get().slots.map((s) => (s.id === id ? actualizado : s)) });
+    set({
+      slots: get().slots.map((s) => (s.id === id ? actualizado : s)),
+      eventos: await marcarEventoActualizado(actual.eventId, get().eventos),
+    });
+    void get().sincronizar({ silencioso: true });
   },
 
   async aplicarServicioATodosLosDias(eventId, serviceId, activar) {
@@ -757,6 +864,8 @@ export const useStore = create<State>((set, get) => ({
       await db.removeMany('slots', objetivo.map((s) => s.id));
       set({ slots: slots.filter((s) => s.serviceId !== serviceId) });
     }
+    set({ eventos: await marcarEventoActualizado(eventId, get().eventos) });
+    void get().sincronizar({ silencioso: true });
   },
 
   /* ═══ Padrón ════════════════════════════════════════════════════ */
@@ -778,10 +887,14 @@ export const useStore = create<State>((set, get) => ({
       creadoEn: ahora,
     }));
     await db.putMany('people', nuevas);
+    const eventos = await marcarEventoActualizado(eventId, get().eventos);
     if (get().eventoId === eventId) {
       const todas = [...get().personas, ...nuevas].sort(compararPersonas);
-      set({ personas: todas });
+      set({ personas: todas, eventos });
+    } else {
+      set({ eventos });
     }
+    await get().sincronizar({ silencioso: true });
     return nuevas.length;
   },
 
@@ -802,11 +915,16 @@ export const useStore = create<State>((set, get) => ({
     };
     if (!persona.nombre) throw new Error('El nombre es obligatorio.');
     await db.put('people', persona);
+    const eventos = await marcarEventoActualizado(eventId, get().eventos);
     if (get().eventoId === eventId) {
       set({
         personas: [...get().personas, persona].sort(compararPersonas),
+        eventos,
       });
+    } else {
+      set({ eventos });
     }
+    void get().sincronizar({ silencioso: true });
     return persona;
   },
 
@@ -819,7 +937,9 @@ export const useStore = create<State>((set, get) => ({
       personas: get()
         .personas.map((p) => (p.id === id ? actualizado : p))
         .sort(compararPersonas),
+      eventos: await marcarEventoActualizado(actual.eventId, get().eventos),
     });
+    void get().sincronizar({ silencioso: true });
   },
 
   async eliminarPersona(id) {
@@ -828,7 +948,14 @@ export const useStore = create<State>((set, get) => ({
       throw new Error('Esta persona tiene entregas firmadas. Desactivala en vez de eliminarla.');
     }
     await db.remove('people', id);
-    set({ personas: get().personas.filter((p) => p.id !== id) });
+    const persona = get().personas.find((fila) => fila.id === id);
+    set({
+      personas: get().personas.filter((p) => p.id !== id),
+      eventos: persona
+        ? await marcarEventoActualizado(persona.eventId, get().eventos)
+        : get().eventos,
+    });
+    void get().sincronizar({ silencioso: true });
   },
 
   async vaciarPadron(eventId) {
@@ -837,7 +964,10 @@ export const useStore = create<State>((set, get) => ({
     }
     const personas = await db.getByIndex<Person>('people', 'eventId', eventId);
     await db.removeMany('people', personas.map((p) => p.id));
-    if (get().eventoId === eventId) set({ personas: [] });
+    const eventos = await marcarEventoActualizado(eventId, get().eventos);
+    if (get().eventoId === eventId) set({ personas: [], eventos });
+    else set({ eventos });
+    void get().sincronizar({ silencioso: true });
   },
 
   /* ═══ Operación ═════════════════════════════════════════════════ */

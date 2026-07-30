@@ -55,7 +55,7 @@ export default function App() {
   // pantalla, no solo en el kiosko. Ninguna firma puede quedarse en la
   // tablet por haber salido de la vista de operación.
   useEffect(() => {
-    if (!HAY_NUBE || !sesion || !eventoId) return;
+    if (!HAY_NUBE || !sesion) return;
 
     const alVolverLaRed = () => setEnLinea(true);
     const alPerderLaRed = () => setEnLinea(false);
@@ -76,7 +76,7 @@ export default function App() {
       document.removeEventListener('visibilitychange', alVolverAlFrente);
       window.clearInterval(reloj);
     };
-  }, [sesion, eventoId, sincronizar, setEnLinea]);
+  }, [sesion, sincronizar, setEnLinea]);
 
   const evento = useMemo(() => eventos.find((e) => e.id === eventoId) ?? null, [eventos, eventoId]);
 

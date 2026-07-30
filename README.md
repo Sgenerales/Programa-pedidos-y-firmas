@@ -56,9 +56,9 @@ padrón, el acta ya emitida no cambia.
 
 ## Decisiones que vale la pena conocer
 
-**Local-first.** Todo se guarda en IndexedDB en la tablet. La app funciona
-completa sin conexión — que es exactamente lo que hace falta en el salón de un
-hotel con wifi saturado. La nube es opcional y aditiva.
+**Supabase compartido con caché offline.** Eventos, padrón, turnos, entregas y
+firmas se reconcilian contra una sola base. IndexedDB permite continuar durante
+un corte de red y publica los cambios cuando vuelve la conexión.
 
 **El padrón se carga entero en memoria.** Con ~170 personas el filtrado es
 instantáneo y no depende de la red. La búsqueda ignora acentos, mayúsculas y

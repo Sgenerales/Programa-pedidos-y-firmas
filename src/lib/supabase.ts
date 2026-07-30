@@ -183,17 +183,15 @@ export interface EstructuraRemota {
   servicios: Service[];
   slots: Slot[];
   personas: Person[];
+  eliminados: string[];
 }
 
-/**
- * Descarga únicamente eventos que todavía no existen en este dispositivo.
- * Nunca pisa una estructura local, porque podría contener cambios sin red.
- */
-export async function bajarEstructurasFaltantes(
-  idsLocales: string[],
-): Promise<EstructuraRemota> {
+/** Descarga la estructura compartida completa. IndexedDB es solo su caché offline. */
+export async function bajarEstructuras(): Promise<EstructuraRemota> {
   const c = await obtenerCliente();
-  if (!c) return { eventos: [], dias: [], servicios: [], slots: [], personas: [] };
+  if (!c) {
+    return { eventos: [], dias: [], servicios: [], slots: [], personas: [], eliminados: [] };
+  }
 
   const resultados = await Promise.all([
     c.from('acta_events').select('*'),
@@ -201,34 +199,36 @@ export async function bajarEstructurasFaltantes(
     c.from('acta_services').select('*'),
     c.from('acta_slots').select('*'),
     c.from('acta_people').select('*'),
+    c.from('acta_event_tombstones').select('event_id'),
   ]);
-  const tablas = ['acta_events', 'acta_days', 'acta_services', 'acta_slots', 'acta_people'];
+  const tablas = [
+    'acta_events',
+    'acta_days',
+    'acta_services',
+    'acta_slots',
+    'acta_people',
+    'acta_event_tombstones',
+  ];
   for (let i = 0; i < resultados.length; i++) {
     const error = resultados[i].error;
     if (error) throw new Error(`${tablas[i]}: ${traducirErrorDatos(error)}`);
   }
 
-  const existentes = new Set(idsLocales);
   const eventos = (resultados[0].data ?? [])
     .map((fila) => aEvento(fila as Record<string, unknown>))
-    .filter((evento) => !existentes.has(evento.id))
     .sort((a, b) => b.actualizadoEn.localeCompare(a.actualizadoEn));
-  const idsNuevos = new Set(eventos.map((evento) => evento.id));
 
   return {
     eventos,
-    dias: (resultados[1].data ?? [])
-      .map((fila) => aDia(fila as Record<string, unknown>))
-      .filter((fila) => idsNuevos.has(fila.eventId)),
-    servicios: (resultados[2].data ?? [])
-      .map((fila) => aServicio(fila as Record<string, unknown>))
-      .filter((fila) => idsNuevos.has(fila.eventId)),
-    slots: (resultados[3].data ?? [])
-      .map((fila) => aSlot(fila as Record<string, unknown>))
-      .filter((fila) => idsNuevos.has(fila.eventId)),
-    personas: (resultados[4].data ?? [])
-      .map((fila) => aPersona(fila as Record<string, unknown>))
-      .filter((fila) => idsNuevos.has(fila.eventId)),
+    dias: (resultados[1].data ?? []).map((fila) => aDia(fila as Record<string, unknown>)),
+    servicios: (resultados[2].data ?? []).map((fila) =>
+      aServicio(fila as Record<string, unknown>),
+    ),
+    slots: (resultados[3].data ?? []).map((fila) => aSlot(fila as Record<string, unknown>)),
+    personas: (resultados[4].data ?? []).map((fila) =>
+      aPersona(fila as Record<string, unknown>),
+    ),
+    eliminados: (resultados[5].data ?? []).map((fila) => String(fila.event_id)),
   };
 }
 
@@ -236,6 +236,16 @@ export async function bajarEstructurasFaltantes(
 export async function eliminarEstructura(eventId: string): Promise<ResultadoNube> {
   const c = await obtenerCliente();
   if (!c) return { ok: false, mensaje: 'Sin conexión configurada.' };
+
+  const { error: errorMarca } = await c
+    .from('acta_event_tombstones')
+    .upsert({ event_id: eventId }, { onConflict: 'event_id' });
+  if (errorMarca) {
+    return {
+      ok: false,
+      mensaje: `acta_event_tombstones: ${traducirErrorDatos(errorMarca)}`,
+    };
+  }
 
   const { data: existente, error: errorLectura } = await c
     .from('acta_events')
@@ -281,21 +291,76 @@ export async function publicarEstructura(datos: DatosEvento): Promise<ResultadoN
   const c = await obtenerCliente();
   if (!c) return { ok: false, mensaje: 'Sin conexión configurada.' };
 
+  const evento = await c
+    .from('acta_events')
+    .upsert([aFilaEvento(datos.evento)], { onConflict: 'id' });
+  if (evento.error) {
+    return { ok: false, mensaje: `acta_events: ${traducirErrorDatos(evento.error)}` };
+  }
+
+  // Un turno recreado puede conservar la misma combinación día/servicio con
+  // otro id. Eliminamos primero solo esos ids obsoletos para no chocar con la
+  // restricción única; el resto se elimina después de guardar lo deseado.
+  const errorSlotsPrevio = await eliminarAusentes(
+    c,
+    'acta_slots',
+    datos.evento.id,
+    new Set(datos.slots.map((fila) => fila.id)),
+  );
+  if (errorSlotsPrevio) return { ok: false, mensaje: errorSlotsPrevio };
+
   const pasos: [string, Record<string, unknown>[]][] = [
-    ['acta_events', [aFilaEvento(datos.evento)]],
     ['acta_days', datos.dias.map(aFilaSimple)],
     ['acta_services', datos.servicios.map(aFilaSimple)],
     ['acta_slots', datos.slots.map(aFilaSlot)],
     ['acta_people', datos.personas.map(aFilaSimple)],
   ];
-
   for (const [tabla, filas] of pasos) {
     if (!filas.length) continue;
-    // upsert nunca lanza: hay que revisar `error` explícitamente.
     const { error } = await c.from(tabla).upsert(filas, { onConflict: 'id' });
     if (error) return { ok: false, mensaje: `${tabla}: ${traducirErrorDatos(error)}` };
   }
+
+  const limpiezas: [string, Set<string>][] = [
+    ['acta_services', new Set(datos.servicios.map((fila) => fila.id))],
+    ['acta_days', new Set(datos.dias.map((fila) => fila.id))],
+    ['acta_people', new Set(datos.personas.map((fila) => fila.id))],
+  ];
+  for (const [tabla, ids] of limpiezas) {
+    const error = await eliminarAusentes(c, tabla, datos.evento.id, ids);
+    if (error) return { ok: false, mensaje: error };
+  }
   return { ok: true };
+}
+
+async function eliminarAusentes(
+  c: SupabaseClient,
+  tabla: string,
+  eventId: string,
+  idsDeseados: Set<string>,
+): Promise<string | null> {
+  const { data: existentes, error: errorLectura } = await c
+    .from(tabla)
+    .select('id')
+    .eq('event_id', eventId);
+  if (errorLectura) return `${tabla}: ${traducirErrorDatos(errorLectura)}`;
+
+  const sobrantes = (existentes ?? [])
+    .map((fila) => String(fila.id))
+    .filter((id) => !idsDeseados.has(id));
+  if (!sobrantes.length) return null;
+
+  const { data: eliminados, error: errorBorrado } = await c
+    .from(tabla)
+    .delete()
+    .in('id', sobrantes)
+    .select('id');
+  if (errorBorrado) return `${tabla}: ${traducirErrorDatos(errorBorrado)}`;
+  const confirmados = new Set((eliminados ?? []).map((fila) => String(fila.id)));
+  if (sobrantes.some((id) => !confirmados.has(id))) {
+    return `${tabla}: Supabase no autorizó eliminar registros obsoletos.`;
+  }
+  return null;
 }
 
 /* ─── Entregas ───────────────────────────────────────────────────── */

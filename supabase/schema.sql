@@ -296,6 +296,137 @@ end $$;
 
 -- Vista de auditoría: SECURITY INVOKER conserva RLS de las tablas subyacentes.
 
+-- La estructura puede ser mantenida por operadores; borrar el evento completo
+-- o entregas firmadas continúa reservado a administradores.
+drop policy if exists acta_days_admin_delete on public.acta_days;
+drop policy if exists acta_days_operator_delete on public.acta_days;
+create policy acta_days_operator_delete
+  on public.acta_days for delete to authenticated
+  using (public.acta_can_write());
+
+drop policy if exists acta_services_admin_delete on public.acta_services;
+drop policy if exists acta_services_operator_delete on public.acta_services;
+create policy acta_services_operator_delete
+  on public.acta_services for delete to authenticated
+  using (public.acta_can_write());
+
+drop policy if exists acta_slots_admin_delete on public.acta_slots;
+drop policy if exists acta_slots_operator_delete on public.acta_slots;
+create policy acta_slots_operator_delete
+  on public.acta_slots for delete to authenticated
+  using (public.acta_can_write());
+
+drop policy if exists acta_people_admin_delete on public.acta_people;
+drop policy if exists acta_people_operator_delete on public.acta_people;
+create policy acta_people_operator_delete
+  on public.acta_people for delete to authenticated
+  using (public.acta_can_write());
+
+create or replace function public.acta_touch_event_from_structure()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  target_event_id text;
+begin
+  if tg_op = 'DELETE' then
+    target_event_id := old.event_id;
+  else
+    target_event_id := new.event_id;
+  end if;
+
+  update public.acta_events
+  set actualizado_en = now()
+  where id = target_event_id;
+
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+  return new;
+end
+$$;
+
+revoke all on function public.acta_touch_event_from_structure() from public, anon, authenticated;
+
+drop trigger if exists acta_days_touch_event on public.acta_days;
+create trigger acta_days_touch_event
+after insert or update or delete on public.acta_days
+for each row execute function public.acta_touch_event_from_structure();
+
+drop trigger if exists acta_services_touch_event on public.acta_services;
+create trigger acta_services_touch_event
+after insert or update or delete on public.acta_services
+for each row execute function public.acta_touch_event_from_structure();
+
+drop trigger if exists acta_slots_touch_event on public.acta_slots;
+create trigger acta_slots_touch_event
+after insert or update or delete on public.acta_slots
+for each row execute function public.acta_touch_event_from_structure();
+
+drop trigger if exists acta_people_touch_event on public.acta_people;
+create trigger acta_people_touch_event
+after insert or update or delete on public.acta_people
+for each row execute function public.acta_touch_event_from_structure();
+
+create table if not exists public.acta_event_tombstones (
+  event_id       text primary key,
+  eliminado_en  timestamptz not null default now(),
+  eliminado_por uuid default auth.uid()
+);
+
+alter table public.acta_event_tombstones enable row level security;
+
+drop policy if exists acta_event_tombstones_member_select
+  on public.acta_event_tombstones;
+create policy acta_event_tombstones_member_select
+  on public.acta_event_tombstones for select to authenticated
+  using (public.acta_is_member());
+
+drop policy if exists acta_event_tombstones_admin_insert
+  on public.acta_event_tombstones;
+create policy acta_event_tombstones_admin_insert
+  on public.acta_event_tombstones for insert to authenticated
+  with check (public.acta_is_admin());
+
+drop policy if exists acta_event_tombstones_admin_update
+  on public.acta_event_tombstones;
+create policy acta_event_tombstones_admin_update
+  on public.acta_event_tombstones for update to authenticated
+  using (public.acta_is_admin())
+  with check (public.acta_is_admin());
+
+revoke all on public.acta_event_tombstones from anon, authenticated;
+grant select, insert, update on public.acta_event_tombstones to authenticated;
+
+create or replace function public.acta_prevent_event_resurrection()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if exists (
+    select 1
+    from public.acta_event_tombstones
+    where event_id = new.id
+  ) then
+    raise exception 'El evento fue eliminado definitivamente y no puede restaurarse'
+      using errcode = '23514';
+  end if;
+  return new;
+end
+$$;
+
+revoke all on function public.acta_prevent_event_resurrection()
+  from public, anon, authenticated;
+
+drop trigger if exists acta_events_prevent_resurrection on public.acta_events;
+create trigger acta_events_prevent_resurrection
+before insert or update on public.acta_events
+for each row execute function public.acta_prevent_event_resurrection();
+
 create or replace view public.acta_entregas_legibles
 with (security_invoker = true)
 as
