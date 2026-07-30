@@ -93,12 +93,15 @@ export async function iniciarSesion(email: string, password: string): Promise<Re
 
   if (errorMiembro && errorMiembro.code !== 'PGRST116') {
     await c.auth.signOut();
+    const falta =
+      errorMiembro.code === 'PGRST205' || errorMiembro.code === '42P01'
+        ? 'La base de datos todavía no tiene las tablas de ACTA.'
+        : errorMiembro.code === '42703' || errorMiembro.code === 'PGRST204'
+          ? 'La tabla acta_members está desactualizada: le falta la columna «nombre».'
+          : null;
     return {
       ok: false,
-      mensaje:
-        errorMiembro.code === 'PGRST205' || errorMiembro.code === '42P01'
-          ? 'La base de datos todavía no tiene las tablas de ACTA. Ejecutá la migración.'
-          : errorMiembro.message,
+      mensaje: falta ? `${falta} Ejecutá la migración de supabase/.` : errorMiembro.message,
     };
   }
 
