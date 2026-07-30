@@ -12,8 +12,10 @@ import { PLANTILLAS_SERVICIO } from '../lib/catalogo';
 import { compararPersonas } from './selectors';
 import { HAY_NUBE } from '../lib/config';
 import {
+  bajarEstructurasFaltantes,
   bajarEntregas,
   cerrarSesion as cerrarSesionNube,
+  eliminarEstructura,
   iniciarSesion as iniciarSesionNube,
   publicarEstructura,
   sesionGuardada,
@@ -195,6 +197,25 @@ async function leerEstructuraDeDisco(eventId: string): Promise<DatosEvento | nul
   return { evento, dias, servicios, slots, personas };
 }
 
+async function incorporarEstructurasRemotas(
+  eventosLocales: EventRecord[],
+): Promise<EventRecord[]> {
+  const remota = await bajarEstructurasFaltantes(eventosLocales.map((evento) => evento.id));
+  if (!remota.eventos.length) return eventosLocales;
+
+  await Promise.all([
+    db.putMany('events', remota.eventos),
+    db.putMany('days', remota.dias),
+    db.putMany('services', remota.servicios),
+    db.putMany('slots', remota.slots),
+    db.putMany('people', remota.personas),
+  ]);
+
+  return [...remota.eventos, ...eventosLocales].sort((a, b) =>
+    b.actualizadoEn.localeCompare(a.actualizadoEn),
+  );
+}
+
 export interface Toast {
   id: string;
   tipo: 'ok' | 'error' | 'info';
@@ -297,7 +318,7 @@ export const useStore = create<State>((set, get) => ({
   sync: { ...SYNC_DEFAULT },
 
   async init() {
-    const eventos = await db.getAll<EventRecord>('events');
+    let eventos = await db.getAll<EventRecord>('events');
     eventos.sort((a, b) => b.creadoEn.localeCompare(a.creadoEn));
     const s = get().settings;
     set({ eventos, listo: true });
@@ -313,6 +334,20 @@ export const useStore = create<State>((set, get) => ({
           ? { ...get().settings, operador: sesion.nombre }
           : get().settings,
       });
+      if (sesion) {
+        try {
+          eventos = await incorporarEstructurasRemotas(eventos);
+          set({ eventos });
+        } catch (err) {
+          set({
+            sync: {
+              ...get().sync,
+              ultimoError:
+                err instanceof Error ? err.message : 'No se pudieron descargar los eventos.',
+            },
+          });
+        }
+      }
     }
 
     if (s.eventoActivoId && eventos.some((e) => e.id === s.eventoActivoId)) {
@@ -330,6 +365,18 @@ export const useStore = create<State>((set, get) => ({
     const next = { ...get().settings, operador: res.sesion.nombre };
     guardarSettings(next);
     set({ sesion: res.sesion, settings: next, sesionVerificada: true });
+    try {
+      const eventos = await incorporarEstructurasRemotas(get().eventos);
+      set({ eventos });
+    } catch (err) {
+      set({
+        sync: {
+          ...get().sync,
+          ultimoError:
+            err instanceof Error ? err.message : 'No se pudieron descargar los eventos.',
+        },
+      });
+    }
     void get().sincronizar({ silencioso: true });
     return { ok: true };
   },
@@ -548,6 +595,12 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async eliminarEvento(id) {
+    if (HAY_NUBE) {
+      const resultado = await eliminarEstructura(id);
+      if (!resultado.ok) {
+        throw new Error(resultado.mensaje ?? 'No se pudo eliminar el evento en Supabase.');
+      }
+    }
     await db.purgeEvent(id);
     set({ eventos: get().eventos.filter((e) => e.id !== id) });
     if (get().eventoId === id) await get().cargarEvento(null);

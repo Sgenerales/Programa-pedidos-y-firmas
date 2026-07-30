@@ -201,9 +201,13 @@ export function EventosPage({ onAbrirConfiguracion, onAbrirPadron }: Props) {
         onCancelar={() => setAEliminar(null)}
         onConfirmar={async () => {
           if (!aEliminar) return;
-          await eliminarEvento(aEliminar.id);
-          setAEliminar(null);
-          toast({ tipo: 'info', titulo: 'Evento eliminado' });
+          try {
+            await eliminarEvento(aEliminar.id);
+            setAEliminar(null);
+            toast({ tipo: 'info', titulo: 'Evento eliminado' });
+          } catch (err) {
+            toast({ tipo: 'error', titulo: 'No se pudo eliminar', detalle: mensaje(err) });
+          }
         }}
       />
     </main>
@@ -396,10 +400,21 @@ function NuevoEventoModal({
         </div>
         <div className="grid grid--2">
           <Campo etiqueta="Primer día">
-            <input className="input" type="date" value={inicio} onChange={(e) => setInicio(e.target.value)} />
+            <input
+              className="input"
+              type="date"
+              value={inicio}
+              onInput={(e) => setInicio(e.currentTarget.value)}
+            />
           </Campo>
           <Campo etiqueta="Último día">
-            <input className="input" type="date" min={inicio} value={fin} onChange={(e) => setFin(e.target.value)} />
+            <input
+              className="input"
+              type="date"
+              min={inicio}
+              value={fin}
+              onInput={(e) => setFin(e.currentTarget.value)}
+            />
           </Campo>
         </div>
       </div>

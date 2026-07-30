@@ -177,11 +177,105 @@ export interface DatosEvento {
   personas: Person[];
 }
 
+export interface EstructuraRemota {
+  eventos: EventRecord[];
+  dias: EventDay[];
+  servicios: Service[];
+  slots: Slot[];
+  personas: Person[];
+}
+
 /**
- * Replica la estructura del evento. Es idempotente y barata, así que el
- * motor la ejecuta antes de subir entregas: sin turnos ni personas en la
- * nube, cada entrega chocaría contra la clave foránea y la firma se
- * quedaría atascada en la tablet.
+ * Descarga únicamente eventos que todavía no existen en este dispositivo.
+ * Nunca pisa una estructura local, porque podría contener cambios sin red.
+ */
+export async function bajarEstructurasFaltantes(
+  idsLocales: string[],
+): Promise<EstructuraRemota> {
+  const c = await obtenerCliente();
+  if (!c) return { eventos: [], dias: [], servicios: [], slots: [], personas: [] };
+
+  const resultados = await Promise.all([
+    c.from('acta_events').select('*'),
+    c.from('acta_days').select('*'),
+    c.from('acta_services').select('*'),
+    c.from('acta_slots').select('*'),
+    c.from('acta_people').select('*'),
+  ]);
+  const tablas = ['acta_events', 'acta_days', 'acta_services', 'acta_slots', 'acta_people'];
+  for (let i = 0; i < resultados.length; i++) {
+    const error = resultados[i].error;
+    if (error) throw new Error(`${tablas[i]}: ${traducirErrorDatos(error)}`);
+  }
+
+  const existentes = new Set(idsLocales);
+  const eventos = (resultados[0].data ?? [])
+    .map((fila) => aEvento(fila as Record<string, unknown>))
+    .filter((evento) => !existentes.has(evento.id))
+    .sort((a, b) => b.actualizadoEn.localeCompare(a.actualizadoEn));
+  const idsNuevos = new Set(eventos.map((evento) => evento.id));
+
+  return {
+    eventos,
+    dias: (resultados[1].data ?? [])
+      .map((fila) => aDia(fila as Record<string, unknown>))
+      .filter((fila) => idsNuevos.has(fila.eventId)),
+    servicios: (resultados[2].data ?? [])
+      .map((fila) => aServicio(fila as Record<string, unknown>))
+      .filter((fila) => idsNuevos.has(fila.eventId)),
+    slots: (resultados[3].data ?? [])
+      .map((fila) => aSlot(fila as Record<string, unknown>))
+      .filter((fila) => idsNuevos.has(fila.eventId)),
+    personas: (resultados[4].data ?? [])
+      .map((fila) => aPersona(fila as Record<string, unknown>))
+      .filter((fila) => idsNuevos.has(fila.eventId)),
+  };
+}
+
+/** Elimina el evento remoto y verifica que RLS haya autorizado el borrado. */
+export async function eliminarEstructura(eventId: string): Promise<ResultadoNube> {
+  const c = await obtenerCliente();
+  if (!c) return { ok: false, mensaje: 'Sin conexión configurada.' };
+
+  const { data: existente, error: errorLectura } = await c
+    .from('acta_events')
+    .select('id')
+    .eq('id', eventId)
+    .maybeSingle();
+  if (errorLectura) {
+    return { ok: false, mensaje: `acta_events: ${traducirErrorDatos(errorLectura)}` };
+  }
+  if (!existente) return { ok: true };
+
+  const { data: eliminados, error: errorBorrado } = await c
+    .from('acta_events')
+    .delete()
+    .eq('id', eventId)
+    .select('id');
+  if (errorBorrado) {
+    return { ok: false, mensaje: `acta_events: ${traducirErrorDatos(errorBorrado)}` };
+  }
+  if (!eliminados?.some((fila) => fila.id === eventId)) {
+    return { ok: false, mensaje: 'Supabase no autorizó la eliminación del evento.' };
+  }
+
+  const { data: verificacion, error: errorVerificacion } = await c
+    .from('acta_events')
+    .select('id')
+    .eq('id', eventId)
+    .maybeSingle();
+  if (errorVerificacion) {
+    return { ok: false, mensaje: `acta_events: ${traducirErrorDatos(errorVerificacion)}` };
+  }
+  if (verificacion) {
+    return { ok: false, mensaje: 'El evento todavía existe en Supabase.' };
+  }
+  return { ok: true };
+}
+
+/**
+ * Replica la estructura del evento antes de subir entregas para garantizar
+ * que existan sus claves foráneas en la nube.
  */
 export async function publicarEstructura(datos: DatosEvento): Promise<ResultadoNube> {
   const c = await obtenerCliente();
@@ -447,6 +541,79 @@ function aFilaEvento(e: EventRecord): Record<string, unknown> {
     requiere_documento: e.requiereDocumento,
     permite_walk_in: e.permiteWalkIn,
     notas: e.notas,
+  };
+}
+
+function aEvento(f: Record<string, unknown>): EventRecord {
+  const actualizadoEn = String(f.actualizado_en ?? new Date().toISOString());
+  return {
+    id: String(f.id),
+    nombre: String(f.nombre ?? ''),
+    organizador: String(f.organizador ?? ''),
+    lugar: String(f.lugar ?? ''),
+    fechaInicio: String(f.fecha_inicio ?? ''),
+    fechaFin: String(f.fecha_fin ?? ''),
+    estado: (f.estado as EventRecord['estado']) ?? 'borrador',
+    requiereDocumento: Boolean(f.requiere_documento),
+    permiteWalkIn: Boolean(f.permite_walk_in),
+    notas: String(f.notas ?? ''),
+    creadoEn: actualizadoEn,
+    actualizadoEn,
+  };
+}
+
+function aDia(f: Record<string, unknown>): EventDay {
+  return {
+    id: String(f.id),
+    eventId: String(f.event_id),
+    fecha: String(f.fecha ?? ''),
+    etiqueta: String(f.etiqueta ?? ''),
+    orden: Number(f.orden ?? 0),
+  };
+}
+
+function aServicio(f: Record<string, unknown>): Service {
+  return {
+    id: String(f.id),
+    eventId: String(f.event_id),
+    nombre: String(f.nombre ?? ''),
+    icono: String(f.icono ?? 'caja'),
+    color: String(f.color ?? '#8FA8B8'),
+    requiereFirma: Boolean(f.requiere_firma),
+    orden: Number(f.orden ?? 0),
+  };
+}
+
+function aSlot(f: Record<string, unknown>): Slot {
+  return {
+    id: String(f.id),
+    eventId: String(f.event_id),
+    dayId: String(f.day_id),
+    serviceId: String(f.service_id),
+    horaDesde: String(f.hora_desde ?? ''),
+    horaHasta: String(f.hora_hasta ?? ''),
+    gruposHabilitados: Array.isArray(f.grupos_habilitados)
+      ? f.grupos_habilitados.map(String)
+      : [],
+  };
+}
+
+function aPersona(f: Record<string, unknown>): Person {
+  return {
+    id: String(f.id),
+    eventId: String(f.event_id),
+    nombre: String(f.nombre ?? ''),
+    documento: String(f.documento ?? ''),
+    empresa: String(f.empresa ?? ''),
+    grupo: String(f.grupo ?? ''),
+    referencia: String(f.referencia ?? ''),
+    telefono: String(f.telefono ?? ''),
+    diasHabilitados: Array.isArray(f.dias_habilitados)
+      ? f.dias_habilitados.map(String)
+      : null,
+    activo: f.activo !== false,
+    origen: f.origen === 'manual' ? 'manual' : 'importado',
+    creadoEn: String(f.creado_en ?? new Date().toISOString()),
   };
 }
 

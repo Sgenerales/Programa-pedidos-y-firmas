@@ -91,7 +91,9 @@ export function ConfiguracionPage({ onIrAPadron }: { onIrAPadron: () => void }) 
                     className="input"
                     type="date"
                     value={evento.fechaInicio}
-                    onChange={(e) => actualizarEvento(evento.id, { fechaInicio: e.target.value })}
+                    onInput={(e) =>
+                      actualizarEvento(evento.id, { fechaInicio: e.currentTarget.value })
+                    }
                   />
                 </Campo>
                 <Campo etiqueta="Último día">
@@ -100,7 +102,9 @@ export function ConfiguracionPage({ onIrAPadron }: { onIrAPadron: () => void }) 
                     type="date"
                     min={evento.fechaInicio}
                     value={evento.fechaFin}
-                    onChange={(e) => actualizarEvento(evento.id, { fechaFin: e.target.value })}
+                    onInput={(e) =>
+                      actualizarEvento(evento.id, { fechaFin: e.currentTarget.value })
+                    }
                   />
                 </Campo>
               </div>
