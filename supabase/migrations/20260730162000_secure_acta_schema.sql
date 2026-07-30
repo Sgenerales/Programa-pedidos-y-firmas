@@ -9,11 +9,17 @@ create extension if not exists "pgcrypto";
 create table if not exists public.acta_members (
   user_id    uuid primary key references auth.users(id) on delete cascade,
   email      text not null,
+  -- Nombre que va impreso en el acta junto a cada firma. Si queda vacío,
+  -- la aplicación lo deriva de la parte local del correo.
+  nombre     text not null default '',
   role       text not null default 'operator'
              check (role in ('admin', 'operator', 'auditor')),
   activo     boolean not null default true,
   creado_en timestamptz not null default now()
 );
+
+-- Idempotente para instalaciones anteriores a la columna `nombre`.
+alter table public.acta_members add column if not exists nombre text not null default '';
 
 create unique index if not exists acta_members_email_idx
   on public.acta_members (lower(email));

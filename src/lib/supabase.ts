@@ -1,10 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import * as db from './idb';
+import { HAY_NUBE, SUPABASE_KEY, SUPABASE_URL } from './config';
 import type {
   Delivery,
-  DeviceSettings,
   EventDay,
   EventRecord,
+  Miembro,
   Person,
   Service,
   SignatureRecord,
@@ -12,152 +13,176 @@ import type {
 } from '../types';
 
 /* ═══════════════════════════════════════════════════════════════════
-   Sincronización opcional
+   Nube: sesión y sincronización
    ───────────────────────────────────────────────────────────────────
-   La app es local-first: nada de esto es necesario para operar. Si hay
-   credenciales cargadas, se replica el evento y las entregas para que
-   varios puestos se vean entre sí y quede respaldo en la nube.
+   La app sigue siendo local-first: toda entrega se escribe primero en
+   IndexedDB y recién después viaja. Pero ninguna entrega firmada puede
+   quedarse en la tablet: el motor de sincronización reintenta hasta
+   confirmarla en Postgres, que es la fuente del reporte.
    ═══════════════════════════════════════════════════════════════════ */
 
 let cliente: SupabaseClient | null = null;
-let clienteCredencial = '';
 
-/** El SDK solo se descarga si la sincronización está realmente activa. */
-export async function obtenerCliente(s: DeviceSettings): Promise<SupabaseClient | null> {
-  if (!s.syncHabilitado || !s.supabaseUrl || !s.supabaseAnonKey) return null;
-  const credencial = `${s.supabaseUrl.trim()}|${s.supabaseAnonKey.trim()}`;
-  if (cliente && clienteCredencial === credencial) return cliente;
-  try {
-    const { createClient } = await import('@supabase/supabase-js');
-    cliente = createClient(s.supabaseUrl.trim(), s.supabaseAnonKey.trim(), {
-      auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: false,
-      },
-      realtime: { params: { eventsPerSecond: 5 } },
-    });
-    clienteCredencial = credencial;
-    return cliente;
-  } catch {
-    return null;
-  }
+/** El SDK se descarga la primera vez que hace falta, no en el arranque. */
+export async function obtenerCliente(): Promise<SupabaseClient | null> {
+  if (!HAY_NUBE) return null;
+  if (cliente) return cliente;
+  const { createClient } = await import('@supabase/supabase-js');
+  cliente = createClient(SUPABASE_URL, SUPABASE_KEY, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: false,
+      storageKey: 'acta.sesion',
+    },
+    realtime: { params: { eventsPerSecond: 5 } },
+  });
+  return cliente;
 }
 
-export function reiniciarCliente(): void {
-  cliente = null;
-  clienteCredencial = '';
+/* ─── Sesión ─────────────────────────────────────────────────────── */
+
+export interface Sesion {
+  userId: string;
+  email: string;
+  nombre: string;
+  rol: Miembro['rol'];
 }
 
-export interface EstadoSesion {
-  autenticado: boolean;
-  email?: string;
-  mensaje?: string;
-}
+export type ResultadoLogin =
+  | { ok: true; sesion: Sesion }
+  | { ok: false; mensaje: string; campo?: 'email' | 'password' };
 
-/** Devuelve la sesión persistida del dispositivo sin solicitar credenciales otra vez. */
-export async function obtenerEstadoSesion(s: DeviceSettings): Promise<EstadoSesion> {
-  const c = await obtenerCliente({ ...s, syncHabilitado: true });
-  if (!c) return { autenticado: false, mensaje: 'Faltan la URL o la clave publicable.' };
-  const { data, error } = await c.auth.getSession();
-  if (error) return { autenticado: false, mensaje: error.message };
+/**
+ * Sesión guardada en el dispositivo. Devuelve datos aunque no haya red:
+ * es lo que permite seguir operando con el wifi caído tras entrar una vez.
+ */
+export async function sesionGuardada(): Promise<Sesion | null> {
+  const c = await obtenerCliente();
+  if (!c) return null;
+  const { data } = await c.auth.getSession();
+  const u = data.session?.user;
+  if (!u) return null;
   return {
-    autenticado: Boolean(data.session),
-    email: data.session?.user.email ?? undefined,
+    userId: u.id,
+    email: u.email ?? '',
+    nombre: nombreDesde(u.user_metadata, u.email ?? ''),
+    rol: (u.user_metadata?.acta_rol as Miembro['rol']) ?? 'operator',
   };
 }
 
-/** Inicia Supabase Auth sin persistir la contraseña en la configuración local. */
-export async function iniciarSesion(
-  s: DeviceSettings,
-  email: string,
-  password: string,
-): Promise<EstadoSesion> {
-  const c = await obtenerCliente({ ...s, syncHabilitado: true });
-  if (!c) return { autenticado: false, mensaje: 'Faltan la URL o la clave publicable.' };
+export async function iniciarSesion(email: string, password: string): Promise<ResultadoLogin> {
+  const c = await obtenerCliente();
+  if (!c) return { ok: false, mensaje: 'Esta instalación no tiene configurada la conexión a la nube.' };
+
   const { data, error } = await c.auth.signInWithPassword({
-    email: email.trim(),
+    email: email.trim().toLowerCase(),
     password,
   });
-  if (error) return { autenticado: false, mensaje: error.message };
-  return {
-    autenticado: Boolean(data.session),
-    email: data.user?.email ?? email.trim(),
+
+  if (error) return { ok: false, ...traducirErrorAuth(error.message) };
+  const u = data.user;
+  if (!u) return { ok: false, mensaje: 'Supabase no devolvió el usuario.' };
+
+  // Estar autenticado no alcanza: hay que estar autorizado en ACTA.
+  const { data: miembro, error: errorMiembro } = await c
+    .from('acta_members')
+    .select('user_id, email, nombre, role, activo')
+    .eq('user_id', u.id)
+    .maybeSingle();
+
+  if (errorMiembro && errorMiembro.code !== 'PGRST116') {
+    await c.auth.signOut();
+    return {
+      ok: false,
+      mensaje:
+        errorMiembro.code === 'PGRST205' || errorMiembro.code === '42P01'
+          ? 'La base de datos todavía no tiene las tablas de ACTA. Ejecutá la migración.'
+          : errorMiembro.message,
+    };
+  }
+
+  if (!miembro || !miembro.activo) {
+    await c.auth.signOut();
+    return {
+      ok: false,
+      mensaje: miembro
+        ? 'Esta cuenta está desactivada. Pedí que la reactiven.'
+        : 'Esta cuenta existe pero no está autorizada para ACTA.',
+      campo: 'email',
+    };
+  }
+
+  const sesion: Sesion = {
+    userId: u.id,
+    email: u.email ?? email,
+    nombre: (miembro.nombre as string)?.trim() || nombreDesde(u.user_metadata, u.email ?? email),
+    rol: (miembro.role as Miembro['rol']) ?? 'operator',
   };
+
+  // Guardamos rol y nombre en el usuario para reconocerlos sin red.
+  await c.auth.updateUser({
+    data: { acta_rol: sesion.rol, acta_nombre: sesion.nombre },
+  });
+
+  return { ok: true, sesion };
 }
 
-export async function cerrarSesion(s: DeviceSettings): Promise<{ ok: boolean; mensaje?: string }> {
-  const c = await obtenerCliente({ ...s, syncHabilitado: true });
-  if (!c) return { ok: false, mensaje: 'Faltan la URL o la clave publicable.' };
-  const { error } = await c.auth.signOut();
-  if (error) return { ok: false, mensaje: error.message };
-  return { ok: true };
+export async function cerrarSesion(): Promise<void> {
+  const c = await obtenerCliente();
+  await c?.auth.signOut();
 }
 
-export interface ResultadoSync {
+function nombreDesde(metadata: Record<string, unknown> | undefined, email: string): string {
+  const guardado = (metadata?.acta_nombre ?? metadata?.full_name ?? metadata?.name) as
+    | string
+    | undefined;
+  if (guardado?.trim()) return guardado.trim();
+  const local = email.split('@')[0] ?? '';
+  return local.replace(/[._-]+/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase()) || email;
+}
+
+function traducirErrorAuth(mensaje: string): { mensaje: string; campo?: 'email' | 'password' } {
+  const m = mensaje.toLowerCase();
+  if (m.includes('invalid login credentials')) {
+    return { mensaje: 'Correo o contraseña incorrectos.', campo: 'password' };
+  }
+  if (m.includes('email not confirmed')) {
+    return { mensaje: 'La cuenta existe pero el correo no fue confirmado.', campo: 'email' };
+  }
+  if (m.includes('failed to fetch') || m.includes('network')) {
+    return { mensaje: 'Sin conexión. Conectate a la red para entrar la primera vez.' };
+  }
+  if (m.includes('rate limit') || m.includes('too many')) {
+    return { mensaje: 'Demasiados intentos. Esperá un minuto y probá de nuevo.' };
+  }
+  return { mensaje };
+}
+
+/* ─── Estructura del evento ──────────────────────────────────────── */
+
+export interface ResultadoNube {
   ok: boolean;
-  subidas: number;
-  bajadas: number;
   mensaje?: string;
 }
 
-/** Verifica credenciales y presencia de las tablas requeridas. */
-export async function probarConexion(s: DeviceSettings): Promise<{ ok: boolean; mensaje: string }> {
-  const c = await obtenerCliente({ ...s, syncHabilitado: true });
-  if (!c) return { ok: false, mensaje: 'Faltan la URL o la clave publicable.' };
-  const { data: sesion, error: errorSesion } = await c.auth.getSession();
-  if (errorSesion) return { ok: false, mensaje: errorSesion.message };
-  if (!sesion.session) {
-    return { ok: false, mensaje: 'La conexión responde, pero este puesto aún no inició sesión.' };
-  }
-  const { data: membresia, error: errorMembresia } = await c
-    .from('acta_members')
-    .select('user_id, role, activo')
-    .eq('user_id', sesion.session.user.id)
-    .maybeSingle();
-  if (errorMembresia) {
-    return {
-      ok: false,
-      mensaje:
-        errorMembresia.code === '42P01' || errorMembresia.code === 'PGRST205'
-          ? 'Conectó, pero faltan las tablas. Ejecutá la migración segura de Supabase.'
-          : errorMembresia.message,
-    };
-  }
-  if (!membresia?.activo) {
-    return { ok: false, mensaje: 'El usuario inició sesión, pero no está autorizado para ACTA.' };
-  }
-  const { error } = await c.from('acta_deliveries').select('id').limit(1);
-  if (error) {
-    return {
-      ok: false,
-      mensaje:
-        error.code === '42P01' || error.code === 'PGRST205'
-          ? 'Conectó, pero faltan las tablas. Ejecutá la migración segura de Supabase.'
-          : error.message,
-    };
-  }
-  return {
-    ok: true,
-    mensaje: `Conexión segura verificada como ${sesion.session.user.email ?? 'usuario autorizado'}.`,
-  };
+export interface DatosEvento {
+  evento: EventRecord;
+  dias: EventDay[];
+  servicios: Service[];
+  slots: Slot[];
+  personas: Person[];
 }
 
-/* ─── Subida ─────────────────────────────────────────────────────── */
-
-/** Replica la estructura del evento. Idempotente: upsert por id. */
-export async function subirEstructura(
-  s: DeviceSettings,
-  datos: {
-    evento: EventRecord;
-    dias: EventDay[];
-    servicios: Service[];
-    slots: Slot[];
-    personas: Person[];
-  },
-): Promise<{ ok: boolean; mensaje?: string }> {
-  const c = await obtenerCliente(s);
-  if (!c) return { ok: false, mensaje: 'Sincronización desactivada.' };
+/**
+ * Replica la estructura del evento. Es idempotente y barata, así que el
+ * motor la ejecuta antes de subir entregas: sin turnos ni personas en la
+ * nube, cada entrega chocaría contra la clave foránea y la firma se
+ * quedaría atascada en la tablet.
+ */
+export async function publicarEstructura(datos: DatosEvento): Promise<ResultadoNube> {
+  const c = await obtenerCliente();
+  if (!c) return { ok: false, mensaje: 'Sin conexión configurada.' };
 
   const pasos: [string, Record<string, unknown>[]][] = [
     ['acta_events', [aFilaEvento(datos.evento)]],
@@ -169,23 +194,28 @@ export async function subirEstructura(
 
   for (const [tabla, filas] of pasos) {
     if (!filas.length) continue;
-    // upsert nunca lanza: siempre hay que revisar `error` explícitamente.
+    // upsert nunca lanza: hay que revisar `error` explícitamente.
     const { error } = await c.from(tabla).upsert(filas, { onConflict: 'id' });
-    if (error) return { ok: false, mensaje: `${tabla}: ${error.message}` };
+    if (error) return { ok: false, mensaje: `${tabla}: ${traducirErrorDatos(error)}` };
   }
   return { ok: true };
 }
 
+/* ─── Entregas ───────────────────────────────────────────────────── */
+
+export interface ResultadoSubida {
+  subidas: number;
+  conflictos: Delivery[];
+  mensaje?: string;
+}
+
 /**
- * Sube las entregas pendientes. La unicidad (slot_id, person_id) vive en
- * la base: si otro puesto ya registró a esa persona, el insert choca y
- * conservamos el registro remoto en vez de pisarlo.
+ * Sube todas las entregas pendientes con su firma. Solo marca una como
+ * sincronizada cuando Postgres la confirmó: si algo falla, queda
+ * pendiente y se reintenta en el próximo ciclo.
  */
-export async function subirEntregas(
-  s: DeviceSettings,
-  eventId: string,
-): Promise<{ subidas: number; conflictos: Delivery[]; mensaje?: string }> {
-  const c = await obtenerCliente(s);
+export async function subirEntregas(eventId: string): Promise<ResultadoSubida> {
+  const c = await obtenerCliente();
   if (!c) return { subidas: 0, conflictos: [] };
 
   const todas = await db.getByIndex<Delivery>('deliveries', 'eventId', eventId);
@@ -200,6 +230,10 @@ export async function subirEntregas(
       ? await db.get<SignatureRecord>('signatures', entrega.id)
       : undefined;
 
+    // Una entrega que dice tener firma pero perdió el trazo no puede
+    // subirse como firmada: el acta afirmaría algo que no puede mostrar.
+    const conFirmaReal = Boolean(entrega.conFirma && firma?.png);
+
     const { error } = await c.from('acta_deliveries').upsert(
       [
         {
@@ -210,7 +244,7 @@ export async function subirEntregas(
           estado: entrega.estado,
           nombre_firmante: entrega.nombreFirmante,
           documento_firmante: entrega.documentoFirmante,
-          con_firma: entrega.conFirma,
+          con_firma: conFirmaReal,
           firma_png: firma?.png ?? null,
           firma_trazos: firma?.trazos ?? null,
           firma_ancho: firma?.ancho ?? null,
@@ -229,31 +263,13 @@ export async function subirEntregas(
     );
 
     if (error) {
-      // 23505 = violación de unicidad (slot_id, person_id) desde otro puesto.
+      // 23505 = otro puesto ya registró a esa persona en ese turno.
       if (error.code === '23505') {
         conflictos.push(entrega);
+        await db.put('deliveries', { ...entrega, sync: 'conflicto' });
         continue;
       }
-      // 23503 = el turno o la persona todavía no existen en la nube: el
-      // evento nunca se publicó. Es el error más probable al empezar, y
-      // el mensaje crudo de Postgres no le dice nada al operador.
-      if (error.code === '23503') {
-        return {
-          subidas,
-          conflictos,
-          mensaje:
-            'Este evento todavía no está publicado en la nube. Andá a Ajustes → «Publicar evento actual» y volvé a intentar.',
-        };
-      }
-      // 42501 / PGRST301 = el usuario entró pero no tiene permiso de escritura.
-      if (error.code === '42501' || error.code === 'PGRST301') {
-        return {
-          subidas,
-          conflictos,
-          mensaje: 'Este usuario no tiene permiso para registrar entregas (rol «auditor» o inactivo).',
-        };
-      }
-      return { subidas, conflictos, mensaje: error.message };
+      return { subidas, conflictos, mensaje: traducirErrorDatos(error) };
     }
 
     await db.put('deliveries', { ...entrega, sync: 'sincronizado' });
@@ -263,18 +279,13 @@ export async function subirEntregas(
   return { subidas, conflictos };
 }
 
-/* ─── Bajada ─────────────────────────────────────────────────────── */
-
 /** Trae entregas registradas por otros puestos y las fusiona localmente. */
-export async function bajarEntregas(
-  s: DeviceSettings,
-  eventId: string,
-): Promise<{ bajadas: number; mensaje?: string }> {
-  const c = await obtenerCliente(s);
+export async function bajarEntregas(eventId: string): Promise<{ bajadas: number; mensaje?: string }> {
+  const c = await obtenerCliente();
   if (!c) return { bajadas: 0 };
 
   const { data, error } = await c.from('acta_deliveries').select('*').eq('event_id', eventId);
-  if (error) return { bajadas: 0, mensaje: error.message };
+  if (error) return { bajadas: 0, mensaje: traducirErrorDatos(error) };
   if (!data?.length) return { bajadas: 0 };
 
   const locales = await db.getByIndex<Delivery>('deliveries', 'eventId', eventId);
@@ -284,22 +295,21 @@ export async function bajarEntregas(
   const nuevas: Delivery[] = [];
   const firmas: SignatureRecord[] = [];
 
-  for (const fila of data as Record<string, never>[]) {
+  for (const fila of data as Record<string, unknown>[]) {
     const entrega = aEntrega(fila);
     const local = porId.get(entrega.id);
-    // Nunca sobreescribimos una entrega local ya sincronizada con otra
-    // identidad de firmante para el mismo turno: la primera manda.
+    // Nunca pisamos una entrega local distinta para el mismo turno.
     if (!local && porSlotPersona.has(`${entrega.slotId}|${entrega.personId}`)) continue;
     if (local && local.estado === entrega.estado && local.sync === 'sincronizado') continue;
 
     nuevas.push(entrega);
-    const png = fila['firma_png'] as unknown as string | null;
+    const png = fila['firma_png'] as string | null;
     if (png) {
       firmas.push({
         id: entrega.id,
         eventId,
         png,
-        trazos: (fila['firma_trazos'] as never) ?? [],
+        trazos: (fila['firma_trazos'] as SignatureRecord['trazos']) ?? [],
         ancho: Number(fila['firma_ancho']) || 600,
         alto: Number(fila['firma_alto']) || 240,
       });
@@ -312,19 +322,12 @@ export async function bajarEntregas(
 }
 
 /** Suscripción realtime a las entregas del evento. Devuelve el cierre. */
-export function suscribirEntregas(
-  s: DeviceSettings,
-  eventId: string,
-  onCambio: () => void,
-): () => void {
-  // El cliente se resuelve de forma asíncrona (el SDK se carga bajo
-  // demanda), pero el efecto de React necesita su función de limpieza
-  // de inmediato: la devolvemos ya y la completamos cuando conecta.
+export function suscribirEntregas(eventId: string, onCambio: () => void): () => void {
   let cerrar = () => {};
   let cancelado = false;
 
   void (async () => {
-    const c = await obtenerCliente(s);
+    const c = await obtenerCliente();
     if (!c || cancelado) return;
     const canal = c
       .channel(`acta:${eventId}`)
@@ -343,6 +346,37 @@ export function suscribirEntregas(
     cancelado = true;
     cerrar();
   };
+}
+
+/** Cuántas entregas de este evento existen ya en la nube. */
+export async function contarEnNube(eventId: string): Promise<number | null> {
+  const c = await obtenerCliente();
+  if (!c) return null;
+  const { count, error } = await c
+    .from('acta_deliveries')
+    .select('id', { count: 'exact', head: true })
+    .eq('event_id', eventId);
+  return error ? null : (count ?? 0);
+}
+
+/* ─── Traducción de errores ──────────────────────────────────────── */
+
+function traducirErrorDatos(error: { code?: string; message: string }): string {
+  switch (error.code) {
+    case '23503':
+      return 'El evento todavía no está publicado en la nube. Se reintenta solo.';
+    case '42501':
+    case 'PGRST301':
+      return 'Esta cuenta no tiene permiso para escribir (rol «auditor» o inactiva).';
+    case 'PGRST205':
+    case '42P01':
+      return 'Faltan las tablas de ACTA en la base. Ejecutá la migración.';
+    case '23514':
+      return `Un valor no pasó la validación de la base: ${error.message}`;
+    default:
+      if (/failed to fetch|networkerror/i.test(error.message)) return 'Sin conexión.';
+      return error.message;
+  }
 }
 
 /* ─── Mapeo camelCase ↔ snake_case ───────────────────────────────── */

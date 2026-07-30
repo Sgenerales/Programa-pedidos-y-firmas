@@ -89,48 +89,40 @@ y quedan en el acta tachadas, nunca se borran.
 
 ---
 
-## Sincronización entre tablets (opcional)
+## La nube
 
-Solo hace falta si operás con dos o más puestos en el mismo turno y querés que se
-vean entre sí en tiempo real.
-
-1. Ejecutá `supabase/schema.sql` en el SQL Editor o aplicá la migración incluida.
-2. Creá los usuarios de cada tablet en **Authentication → Users**.
-3. Autorizá cada usuario en una transacción:
-
-   ```sql
-   begin;
-
-   insert into public.acta_members (user_id, email, role)
-   select id, email, 'operator'
-   from auth.users
-   where lower(email) = lower('tablet@tu-organizacion.com')
-   on conflict (user_id) do update
-     set email = excluded.email,
-         role = excluded.role,
-         activo = true;
-
-   commit;
-
-   select user_id, email, role, activo
-   from public.acta_members
-   where lower(email) = lower('tablet@tu-organizacion.com');
-   ```
-
-   Usá `admin` para quienes deban eliminar datos, `operator` para los puestos
-   y `auditor` para cuentas de solo lectura.
-4. En **Ajustes**, activá la sincronización, cargá la URL y la **publishable
-   key** (nunca la `service_role`) e iniciá sesión con el usuario autorizado.
-5. Probá la conexión y publicá el evento.
-
-El SDK de Supabase solo se descarga si la sincronización está activa. Las
-políticas RLS bloquean por completo a usuarios anónimos. Los miembros activos
-pueden leer, los roles `admin` y `operator` pueden registrar o modificar
-entregas, y solamente `admin` puede eliminar datos. La contraseña nunca se
-guarda en la configuración de ACTA; Supabase conserva una sesión renovable por
+La app viene conectada: la URL y la clave publicable se hornean en el build
+(`.env.local` en desarrollo, variables de entorno en el hosting). Una tablet nueva
+se abre, ingresa correo y contraseña, y ya opera. No se configura nada por
 dispositivo.
 
----
+**Se entra una sola vez.** La sesión queda guardada y se renueva sola. Después el
+kiosko funciona sin red y sincroniza cuando vuelve — que es lo que hace falta en
+el salón de un hotel con wifi saturado.
+
+**Ninguna firma se queda en la tablet.** Cada entrega se escribe primero en
+IndexedDB y sale hacia la nube apenas se confirma. Si falla, queda en cola y el
+motor reintenta: al volver la red, al volver la app al frente, cada 30 segundos, y
+antes de cerrar sesión. La estructura del evento se publica automáticamente antes
+de cada subida, así que nunca hay entregas rebotando por clave foránea. El
+indicador de la barra superior dice en todo momento cuántas quedan sin subir, y en
+Ajustes hay un botón que cuenta las confirmadas directamente en Postgres.
+
+### Puesta en marcha
+
+1. Ejecutá `supabase/migrations/` en el SQL Editor (o `schema.sql`, son idénticos).
+2. Creá cada usuario en **Authentication → Users** con *Auto Confirm* activado.
+3. Autorizalo con `supabase/autorizar_usuario.sql`, indicando correo, nombre y rol.
+
+Los roles son `admin` (puede eliminar), `operator` (registra entregas) y `auditor`
+(solo lectura). El nombre cargado ahí es el que queda impreso en el acta junto a
+cada firma que registre esa persona.
+
+Las políticas RLS bloquean por completo a `anon`: sin sesión no se lee ni se
+escribe nada. La contraseña nunca se guarda en la configuración de ACTA.
+
+Si las variables de entorno faltan, la app arranca igual en modo local y lo avisa
+en Ajustes: se puede operar y exportar, pero sin respaldo en la nube.
 
 ## Desarrollo
 
@@ -153,17 +145,24 @@ src/
     util.ts              Normalización de texto, fechas, sello SHA-256
     importar.ts          Lectura de Excel/CSV, detección de columnas
     exportar.ts          Reporte Excel de 4 hojas y respaldo JSON
-    supabase.ts          Sincronización opcional
+    config.ts            URL y clave publicable horneadas en el build
+    supabase.ts          Sesión, subida de entregas y tiempo real
     catalogo.ts          Plantillas de servicios
   store/
     useStore.ts          Estado y reglas de negocio
     selectors.ts         Datos derivados para la UI
   components/
     SignaturePad.tsx     Captura de firma con ancho variable
+    SyncPill.tsx         Estado de la cola hacia la nube
     Icon.tsx             Set de íconos propio
     ui.tsx               Modal, avisos, campos
-  pages/                 Eventos · Configuración · Padrón · Kiosko · Reportes · Ajustes
-supabase/schema.sql      Esquema de sincronización
+  pages/                 Login · Eventos · Configuración · Padrón · Kiosko
+                         Reportes · Ajustes
+supabase/
+  schema.sql             Esquema completo (idempotente)
+  migrations/            El mismo esquema, versionado
+  autorizar_usuario.sql  Alta de miembros
+scripts/aplicar-sql.mjs  Ejecuta SQL via Management API
 ```
 
 ### Nota sobre SheetJS

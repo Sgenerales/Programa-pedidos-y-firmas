@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { Modal, Vacio } from '../components/ui';
 import { PersonaModal } from './PadronPage';
@@ -12,7 +12,9 @@ import {
   gruposDelPadron,
   resumenTurno,
 } from '../store/selectors';
-import { bajarEntregas, subirEntregas, suscribirEntregas } from '../lib/supabase';
+import { suscribirEntregas } from '../lib/supabase';
+import { HAY_NUBE } from '../lib/config';
+import { SyncPill } from '../components/SyncPill';
 import { fechaCorta, hora, hoyISO, iniciales, norm, pct } from '../lib/util';
 import type { Delivery, PersonRow, Slot } from '../types';
 
@@ -28,7 +30,8 @@ export function KioskoPage({ onSalir }: { onSalir: () => void }) {
   const entregas = useStore((s) => s.entregas);
   const settings = useStore((s) => s.settings);
   const setSettings = useStore((s) => s.setSettings);
-  const cargarEvento = useStore((s) => s.cargarEvento);
+  const sincronizar = useStore((s) => s.sincronizar);
+  const sesion = useStore((s) => s.sesion);
   const agregarPersona = useStore((s) => s.agregarPersona);
   const toast = useStore((s) => s.toast);
 
@@ -56,41 +59,13 @@ export function KioskoPage({ onSalir }: { onSalir: () => void }) {
     }
   }, [slotActivo, settings.slotActivoId, setSettings]);
 
-  /* — Sincronización con otros puestos — */
-  const sincronizar = useCallback(async () => {
-    if (!eventoId || !settings.syncHabilitado) return;
-    const sub = await subirEntregas(settings, eventoId);
-    const baj = await bajarEntregas(settings, eventoId);
-    const errorSync = sub.mensaje ?? baj.mensaje;
-    if (errorSync) {
-      toast({
-        tipo: 'error',
-        titulo: 'No se pudo sincronizar',
-        detalle: errorSync,
-      });
-      return;
-    }
-    if (sub.conflictos.length) {
-      toast({
-        tipo: 'error',
-        titulo: `${sub.conflictos.length} entrega(s) en conflicto`,
-        detalle: 'Otro puesto ya había registrado a esa persona en ese turno.',
-      });
-    }
-    if (baj.bajadas || sub.subidas) await cargarEvento(eventoId);
-  }, [eventoId, settings, cargarEvento, toast]);
-
+  /* — Tiempo real con los otros puestos —
+     La subida periódica la maneja el motor global de App: acá solo
+     escuchamos para reflejar al instante lo que registra otra tablet. */
   useEffect(() => {
-    if (!eventoId || !settings.syncHabilitado) return;
-    void sincronizar();
-    const cerrar = suscribirEntregas(settings, eventoId, () => void sincronizar());
-    const timer = window.setInterval(() => void sincronizar(), 45_000);
-    return () => {
-      cerrar();
-      window.clearInterval(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eventoId, settings.syncHabilitado]);
+    if (!HAY_NUBE || !eventoId || !sesion) return;
+    return suscribirEntregas(eventoId, () => void sincronizar({ silencioso: true }));
+  }, [eventoId, sesion, sincronizar]);
 
   /* — Datos derivados — */
   const indice = useMemo(() => construirIndice(personas), [personas]);
@@ -209,12 +184,7 @@ export function KioskoPage({ onSalir }: { onSalir: () => void }) {
 
         <div className="spacer" />
 
-        {settings.syncHabilitado ? (
-          <span className="badge badge--info" title="Sincronizando con otros puestos">
-            <Icon name="nube" size={12} />
-            En red
-          </span>
-        ) : null}
+        <SyncPill compacto />
 
         <div style={{ width: 150 }}>
           <div className="bar" style={{ marginBottom: 5 }}>
@@ -371,7 +341,7 @@ export function KioskoPage({ onSalir }: { onSalir: () => void }) {
               codigo: d.sello,
             });
             inputRef.current?.focus();
-            if (settings.syncHabilitado) void sincronizar();
+            void sincronizar({ silencioso: true });
           }}
         />
       ) : null}

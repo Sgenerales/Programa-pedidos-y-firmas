@@ -9,11 +9,22 @@ import {
   uid,
 } from '../lib/util';
 import { PLANTILLAS_SERVICIO } from '../lib/catalogo';
+import { HAY_NUBE } from '../lib/config';
+import {
+  bajarEntregas,
+  cerrarSesion as cerrarSesionNube,
+  iniciarSesion as iniciarSesionNube,
+  publicarEstructura,
+  sesionGuardada,
+  subirEntregas,
+} from '../lib/supabase';
 import type {
   Delivery,
   DeviceSettings,
+  EstadoSync,
   EventDay,
   EventRecord,
+  Miembro,
   Person,
   Service,
   SignatureRecord,
@@ -23,35 +34,31 @@ import type {
 
 const SETTINGS_KEY = 'acta.settings';
 
-const SUPABASE_URL_DEFAULT = import.meta.env.VITE_SUPABASE_URL?.trim() ?? '';
-const SUPABASE_KEY_DEFAULT = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY?.trim() ?? '';
-
 const SETTINGS_DEFAULT: DeviceSettings = {
   operador: '',
   puesto: 'Puesto 1',
   eventoActivoId: null,
   slotActivoId: null,
-  supabaseUrl: SUPABASE_URL_DEFAULT,
-  supabaseAnonKey: SUPABASE_KEY_DEFAULT,
-  supabaseEmail: '',
-  syncHabilitado: false,
 };
 
 function leerSettings(): DeviceSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return { ...SETTINGS_DEFAULT };
-    const guardado = JSON.parse(raw) as Partial<DeviceSettings>;
-    return {
-      ...SETTINGS_DEFAULT,
-      ...guardado,
-      supabaseUrl: guardado.supabaseUrl?.trim() || SUPABASE_URL_DEFAULT,
-      supabaseAnonKey: guardado.supabaseAnonKey?.trim() || SUPABASE_KEY_DEFAULT,
-    };
+    return { ...SETTINGS_DEFAULT, ...(JSON.parse(raw) as Partial<DeviceSettings>) };
   } catch {
     return { ...SETTINGS_DEFAULT };
   }
 }
+
+const SYNC_DEFAULT: EstadoSync = {
+  pendientes: 0,
+  conflictos: 0,
+  sincronizando: false,
+  ultimaOk: null,
+  ultimoError: null,
+  enLinea: typeof navigator === 'undefined' ? true : navigator.onLine,
+};
 
 function guardarSettings(s: DeviceSettings): void {
   try {
@@ -102,9 +109,20 @@ interface State {
   settings: DeviceSettings;
   toasts: Toast[];
 
+  /* ─ sesión ─ */
+  sesion: Miembro | null;
+  sesionVerificada: boolean;
+  sync: EstadoSync;
+
   /* ─ ciclo de vida ─ */
   init: () => Promise<void>;
   cargarEvento: (id: string | null) => Promise<void>;
+  entrar: (email: string, password: string) => Promise<{ ok: boolean; mensaje?: string }>;
+  salir: () => Promise<void>;
+  /** Sube lo pendiente y baja lo de otros puestos. Seguro de llamar seguido. */
+  sincronizar: (opciones?: { silencioso?: boolean }) => Promise<void>;
+  refrescarPendientes: () => Promise<void>;
+  setEnLinea: (v: boolean) => void;
 
   /* ─ eventos ─ */
   crearEvento: (parcial: Partial<EventRecord>) => Promise<EventRecord>;
@@ -161,14 +179,135 @@ export const useStore = create<State>((set, get) => ({
   entregas: [],
   settings: leerSettings(),
   toasts: [],
+  sesion: null,
+  sesionVerificada: !HAY_NUBE,
+  sync: { ...SYNC_DEFAULT },
 
   async init() {
     const eventos = await db.getAll<EventRecord>('events');
     eventos.sort((a, b) => b.creadoEn.localeCompare(a.creadoEn));
     const s = get().settings;
     set({ eventos, listo: true });
+
+    if (HAY_NUBE) {
+      // La sesión vive en el dispositivo: si ya entró alguna vez, se sigue
+      // operando aunque ahora no haya red.
+      const sesion = await sesionGuardada().catch(() => null);
+      set({
+        sesion,
+        sesionVerificada: true,
+        settings: sesion?.nombre
+          ? { ...get().settings, operador: sesion.nombre }
+          : get().settings,
+      });
+    }
+
     if (s.eventoActivoId && eventos.some((e) => e.id === s.eventoActivoId)) {
       await get().cargarEvento(s.eventoActivoId);
+    }
+    await get().refrescarPendientes();
+  },
+
+  /* ═══ Sesión ════════════════════════════════════════════════════ */
+
+  async entrar(email, password) {
+    const res = await iniciarSesionNube(email, password);
+    if (!res.ok) return { ok: false, mensaje: res.mensaje };
+    // El operador que firma el acta es la persona que inició sesión.
+    const next = { ...get().settings, operador: res.sesion.nombre };
+    guardarSettings(next);
+    set({ sesion: res.sesion, settings: next, sesionVerificada: true });
+    void get().sincronizar({ silencioso: true });
+    return { ok: true };
+  },
+
+  async salir() {
+    const { sync } = get();
+    if (sync.pendientes > 0) {
+      // Cerrar sesión con firmas sin subir las dejaría varadas en esta
+      // tablet, fuera del reporte. Intentamos vaciar la cola primero.
+      await get().sincronizar({ silencioso: true });
+    }
+    await cerrarSesionNube().catch(() => {});
+    set({ sesion: null });
+  },
+
+  /* ═══ Sincronización ════════════════════════════════════════════ */
+
+  setEnLinea(v) {
+    set({ sync: { ...get().sync, enLinea: v } });
+    if (v) void get().sincronizar({ silencioso: true });
+  },
+
+  async refrescarPendientes() {
+    const { eventoId } = get();
+    if (!eventoId) return;
+    const entregas = await db.getByIndex<Delivery>('deliveries', 'eventId', eventoId);
+    set({
+      sync: {
+        ...get().sync,
+        pendientes: entregas.filter((e) => e.sync === 'pendiente').length,
+        conflictos: entregas.filter((e) => e.sync === 'conflicto').length,
+      },
+    });
+  },
+
+  async sincronizar(opciones) {
+    const { eventoId, eventos, dias, servicios, slots, personas, sesion, sync } = get();
+    if (!HAY_NUBE || !eventoId || !sesion || sync.sincronizando) return;
+
+    const evento = eventos.find((e) => e.id === eventoId);
+    if (!evento) return;
+
+    set({ sync: { ...get().sync, sincronizando: true, ultimoError: null } });
+
+    try {
+      // La estructura viaja siempre primero: sin turnos ni personas en la
+      // nube, las entregas rebotarían por clave foránea y las firmas se
+      // quedarían acá. Es idempotente, así que repetirla no cuesta nada.
+      const estructura = await publicarEstructura({ evento, dias, servicios, slots, personas });
+      if (!estructura.ok) {
+        set({
+          sync: { ...get().sync, sincronizando: false, ultimoError: estructura.mensaje ?? null },
+        });
+        if (!opciones?.silencioso) {
+          get().toast({ tipo: 'error', titulo: 'No se pudo publicar el evento', detalle: estructura.mensaje });
+        }
+        return;
+      }
+
+      const subida = await subirEntregas(eventoId);
+      const bajada = await bajarEntregas(eventoId);
+      const error = subida.mensaje ?? bajada.mensaje ?? null;
+
+      if (subida.subidas || bajada.bajadas || subida.conflictos.length) {
+        await get().cargarEvento(eventoId);
+      }
+      await get().refrescarPendientes();
+
+      set({
+        sync: {
+          ...get().sync,
+          sincronizando: false,
+          ultimoError: error,
+          ultimaOk: error ? get().sync.ultimaOk : new Date().toISOString(),
+        },
+      });
+
+      if (subida.conflictos.length && !opciones?.silencioso) {
+        get().toast({
+          tipo: 'error',
+          titulo: `${subida.conflictos.length} entrega(s) en conflicto`,
+          detalle: 'Otro puesto ya había registrado a esa persona en ese turno.',
+        });
+      }
+      if (error && !opciones?.silencioso) {
+        get().toast({ tipo: 'error', titulo: 'No se pudo sincronizar', detalle: error });
+      }
+    } catch (err) {
+      set({
+        sync: { ...get().sync, sincronizando: false, ultimoError: err instanceof Error ? err.message : 'Error de red' },
+      });
     }
   },
 
@@ -629,6 +768,10 @@ export const useStore = create<State>((set, get) => ({
     }
 
     set({ entregas: [...get().entregas, delivery] });
+    void get().refrescarPendientes();
+    // La firma sale hacia la nube apenas se confirma. No bloqueamos al
+    // operador: si falla, queda pendiente y el motor la reintenta.
+    void get().sincronizar({ silencioso: true });
     return { ok: true, delivery };
   },
 
@@ -645,6 +788,8 @@ export const useStore = create<State>((set, get) => ({
     };
     await db.put('deliveries', anulada);
     set({ entregas: get().entregas.map((e) => (e.id === deliveryId ? anulada : e)) });
+    void get().refrescarPendientes();
+    void get().sincronizar({ silencioso: true });
   },
 
   obtenerFirma(deliveryId) {

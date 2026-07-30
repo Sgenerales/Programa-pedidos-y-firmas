@@ -114,8 +114,8 @@ export interface Delivery {
   anuladoPor?: string;
   motivoAnulacion?: string;
 
-  /** 'pendiente' | 'sincronizado' — solo relevante con Supabase activo. */
-  sync: 'pendiente' | 'sincronizado';
+  /** Estado frente a la nube. 'conflicto' = otro puesto la registró antes. */
+  sync: 'pendiente' | 'sincronizado' | 'conflicto';
 }
 
 /** Firma guardada aparte para no inflar los listados de entregas. */
@@ -150,11 +150,27 @@ export interface DeviceSettings {
   puesto: string;
   eventoActivoId: string | null;
   slotActivoId: string | null;
-  supabaseUrl: string;
-  supabaseAnonKey: string;
-  /** Correo del usuario autorizado de Supabase Auth. La contraseña nunca se persiste. */
-  supabaseEmail: string;
-  syncHabilitado: boolean;
+}
+
+/** Usuario autorizado a operar ACTA. */
+export interface Miembro {
+  userId: string;
+  email: string;
+  nombre: string;
+  rol: 'admin' | 'operator' | 'auditor';
+}
+
+/** Estado del motor de sincronización, para mostrarlo en la interfaz. */
+export interface EstadoSync {
+  /** Entregas firmadas que todavía no están confirmadas en la nube. */
+  pendientes: number;
+  /** Entregas que otro puesto ya había registrado. Requieren revisión. */
+  conflictos: number;
+  sincronizando: boolean;
+  /** ISO de la última sincronización exitosa. */
+  ultimaOk: string | null;
+  ultimoError: string | null;
+  enLinea: boolean;
 }
 
 /* ─── Tipos derivados para la UI ─────────────────────────────────── */

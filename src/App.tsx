@@ -3,6 +3,9 @@ import { Icon, Marca } from './components/Icon';
 import { Toaster } from './components/ui';
 import { useStore } from './store/useStore';
 import { iniciales, rangoLegible } from './lib/util';
+import { SyncPill } from './components/SyncPill';
+import { HAY_NUBE } from './lib/config';
+import { LoginPage } from './pages/LoginPage';
 import { EventosPage } from './pages/EventosPage';
 import { ConfiguracionPage } from './pages/ConfiguracionPage';
 import { PadronPage } from './pages/PadronPage';
@@ -37,12 +40,43 @@ export default function App() {
   const personas = useStore((s) => s.personas);
   const slots = useStore((s) => s.slots);
   const settings = useStore((s) => s.settings);
+  const sesion = useStore((s) => s.sesion);
+  const sesionVerificada = useStore((s) => s.sesionVerificada);
+  const sincronizar = useStore((s) => s.sincronizar);
+  const setEnLinea = useStore((s) => s.setEnLinea);
 
   const [vista, setVista] = useState<Vista>('eventos');
 
   useEffect(() => {
     void init();
   }, [init]);
+
+  // Motor de sincronización a nivel de aplicación: corre en cualquier
+  // pantalla, no solo en el kiosko. Ninguna firma puede quedarse en la
+  // tablet por haber salido de la vista de operación.
+  useEffect(() => {
+    if (!HAY_NUBE || !sesion || !eventoId) return;
+
+    const alVolverLaRed = () => setEnLinea(true);
+    const alPerderLaRed = () => setEnLinea(false);
+    const alVolverAlFrente = () => {
+      if (document.visibilityState === 'visible') void sincronizar({ silencioso: true });
+    };
+
+    window.addEventListener('online', alVolverLaRed);
+    window.addEventListener('offline', alPerderLaRed);
+    document.addEventListener('visibilitychange', alVolverAlFrente);
+    const reloj = window.setInterval(() => void sincronizar({ silencioso: true }), 30_000);
+
+    void sincronizar({ silencioso: true });
+
+    return () => {
+      window.removeEventListener('online', alVolverLaRed);
+      window.removeEventListener('offline', alPerderLaRed);
+      document.removeEventListener('visibilitychange', alVolverAlFrente);
+      window.clearInterval(reloj);
+    };
+  }, [sesion, eventoId, sincronizar, setEnLinea]);
 
   const evento = useMemo(() => eventos.find((e) => e.id === eventoId) ?? null, [eventos, eventoId]);
 
@@ -51,19 +85,12 @@ export default function App() {
     if (!eventoId && vista !== 'eventos' && vista !== 'ajustes') setVista('eventos');
   }, [eventoId, vista]);
 
-  if (!listo) {
-    return (
-      <div className="app app--kiosk">
-        <div style={{ display: 'grid', placeItems: 'center', height: '100%' }}>
-          <div style={{ textAlign: 'center', color: 'var(--fg-3)' }}>
-            <div style={{ color: 'var(--brass)', marginBottom: 12 }}>
-              <Marca size={34} />
-            </div>
-            <div className="eyebrow">Abriendo base local</div>
-          </div>
-        </div>
-      </div>
-    );
+  if (!listo) return <Cargando texto="Abriendo base local" />;
+
+  // Puerta de sesión. Una vez cruzada, la sesión queda guardada en el
+  // dispositivo y la app sigue operando aunque después se caiga la red.
+  if (HAY_NUBE && !sesion) {
+    return sesionVerificada ? <LoginPage /> : <Cargando texto="Verificando sesión" />;
   }
 
   // El kiosko toma la pantalla completa: en piso no hay lugar para menús.
@@ -169,6 +196,7 @@ export default function App() {
             <div className="topbar__sub truncate">{TITULOS[vista].sub}</div>
           </div>
           <div className="topbar__spacer" />
+          <SyncPill />
           {evento ? (
             <button className="btn btn--primary" onClick={() => setVista('kiosko')}>
               <Icon name="kiosko" size={16} />
@@ -187,6 +215,21 @@ export default function App() {
       </div>
 
       <Toaster />
+    </div>
+  );
+}
+
+function Cargando({ texto }: { texto: string }) {
+  return (
+    <div className="app app--kiosk">
+      <div style={{ display: 'grid', placeItems: 'center', height: '100%' }}>
+        <div style={{ textAlign: 'center', color: 'var(--fg-3)' }}>
+          <div style={{ color: 'var(--brass)', marginBottom: 12 }}>
+            <Marca size={34} />
+          </div>
+          <div className="eyebrow">{texto}</div>
+        </div>
+      </div>
     </div>
   );
 }

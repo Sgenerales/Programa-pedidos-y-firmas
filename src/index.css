@@ -2220,3 +2220,128 @@ a {
     display: table-header-group;
   }
 }
+
+/* ═══ Login ══════════════════════════════════════════════════════ */
+
+.login {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(1100px 560px at 78% -12%, rgba(214, 168, 79, 0.09), transparent 62%),
+    radial-gradient(820px 480px at -6% 106%, rgba(110, 168, 255, 0.06), transparent 60%),
+    linear-gradient(180deg, var(--ink) 0%, var(--ink-2) 100%);
+}
+
+.login__card {
+  width: 100%;
+  max-width: 420px;
+  padding: 30px 30px 24px;
+  border-radius: var(--r-xl);
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  box-shadow: var(--shadow-3);
+  animation: scaleIn 0.34s var(--ease);
+}
+
+.login__brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 20px;
+  margin-bottom: 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.login__name {
+  font-family: var(--font-doc);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.1;
+}
+
+.login__title {
+  font-family: var(--font-doc);
+  font-size: 23px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.login__desc {
+  font-size: 13.5px;
+  color: var(--fg-3);
+  margin-top: 5px;
+  line-height: 1.5;
+}
+
+.login__pie {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  font-size: 11.5px;
+  color: var(--fg-4);
+  line-height: 1.55;
+  text-align: center;
+}
+
+/* ═══ Estado de sincronización ═══════════════════════════════════ */
+
+.syncPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+.syncPill--ok {
+  border-color: rgba(79, 195, 138, 0.32);
+  background: var(--ok-dim);
+  color: var(--ok);
+}
+.syncPill--pend {
+  border-color: rgba(230, 163, 60, 0.34);
+  background: var(--warn-dim);
+  color: var(--warn);
+}
+.syncPill--off {
+  border-color: rgba(239, 95, 107, 0.3);
+  background: var(--danger-dim);
+  color: var(--danger);
+}
+.syncPill__spin {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1.6px solid currentColor;
+  border-right-color: transparent;
+  animation: girar 0.7s linear infinite;
+}
+@keyframes girar {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.skipLink {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: 10px 16px;
+  background: var(--brass);
+  color: #22190a;
+  border-radius: 0 0 var(--r-sm) 0;
+  font-weight: 600;
+}
+.skipLink:focus {
+  left: 0;
+}
