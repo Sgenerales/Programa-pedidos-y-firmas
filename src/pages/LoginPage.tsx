@@ -9,6 +9,7 @@ import { PROYECTO } from '../lib/config';
 
 export function LoginPage() {
   const entrar = useStore((s) => s.entrar);
+  const pendientes = useStore((s) => s.sync.pendientes);
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -96,6 +97,18 @@ export function LoginPage() {
               <Icon name="alerta" size={16} />
             </span>
             <span>{error}</span>
+          </div>
+        ) : null}
+
+        {pendientes ? (
+          <div className="notice notice--info" style={{ marginTop: 16 }}>
+            <span className="notice__icon">
+              <Icon name="nube" size={16} />
+            </span>
+            <span>
+              Hay <strong>{pendientes} entrega(s)</strong> guardadas en esta tablet esperando subir.
+              Se envían solas apenas entres.
+            </span>
           </div>
         ) : null}
 

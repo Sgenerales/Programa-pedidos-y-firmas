@@ -212,10 +212,18 @@ export interface ResultadoSubida {
   mensaje?: string;
 }
 
+/** Cuántas entregas viajan por request. Cada una carga su PNG, así que
+    lotes grandes harían cuerpos de varios MB. */
+const LOTE = 20;
+
 /**
- * Sube todas las entregas pendientes con su firma. Solo marca una como
- * sincronizada cuando Postgres la confirmó: si algo falla, queda
- * pendiente y se reintenta en el próximo ciclo.
+ * Sube las entregas pendientes con su firma. Solo marca una como
+ * sincronizada cuando Postgres la confirmó.
+ *
+ * Va por lotes para que un rezago de cientos de firmas —una jornada
+ * entera sin wifi— no se convierta en cientos de requests en serie. Si un
+ * lote falla por una fila puntual, reintenta ese lote de a una: una sola
+ * entrega problemática no puede bloquear a todas las que vienen detrás.
  */
 export async function subirEntregas(eventId: string): Promise<ResultadoSubida> {
   const c = await obtenerCliente();
@@ -227,59 +235,95 @@ export async function subirEntregas(eventId: string): Promise<ResultadoSubida> {
 
   const conflictos: Delivery[] = [];
   let subidas = 0;
+  let mensaje: string | undefined;
 
-  for (const entrega of pendientes) {
-    const firma = entrega.conFirma
-      ? await db.get<SignatureRecord>('signatures', entrega.id)
-      : undefined;
+  for (let i = 0; i < pendientes.length; i += LOTE) {
+    const lote = pendientes.slice(i, i + LOTE);
+    const filas = await Promise.all(lote.map(aFilaEntrega));
 
-    // Una entrega que dice tener firma pero perdió el trazo no puede
-    // subirse como firmada: el acta afirmaría algo que no puede mostrar.
-    const conFirmaReal = Boolean(entrega.conFirma && firma?.png);
+    const { error } = await c.from('acta_deliveries').upsert(filas, { onConflict: 'id' });
 
-    const { error } = await c.from('acta_deliveries').upsert(
-      [
-        {
-          id: entrega.id,
-          event_id: entrega.eventId,
-          slot_id: entrega.slotId,
-          person_id: entrega.personId,
-          estado: entrega.estado,
-          nombre_firmante: entrega.nombreFirmante,
-          documento_firmante: entrega.documentoFirmante,
-          con_firma: conFirmaReal,
-          firma_png: firma?.png ?? null,
-          firma_trazos: firma?.trazos ?? null,
-          firma_ancho: firma?.ancho ?? null,
-          firma_alto: firma?.alto ?? null,
-          firmado_en: entrega.firmadoEn,
-          operador: entrega.operador,
-          dispositivo: entrega.dispositivo,
-          sello: entrega.sello,
-          observacion: entrega.observacion,
-          anulado_en: entrega.anuladoEn ?? null,
-          anulado_por: entrega.anuladoPor ?? null,
-          motivo_anulacion: entrega.motivoAnulacion ?? null,
-        },
-      ],
-      { onConflict: 'id' },
-    );
+    if (!error) {
+      await db.putMany(
+        'deliveries',
+        lote.map((e) => ({ ...e, sync: 'sincronizado' as const })),
+      );
+      subidas += lote.length;
+      continue;
+    }
 
-    if (error) {
-      // 23505 = otro puesto ya registró a esa persona en ese turno.
-      if (error.code === '23505') {
+    // Errores que afectan a todo: no tiene sentido seguir intentando.
+    if (esErrorGlobal(error)) return { subidas, conflictos, mensaje: traducirErrorDatos(error) };
+
+    // El lote cayó por alguna fila concreta: la aislamos.
+    for (const entrega of lote) {
+      const fila = await aFilaEntrega(entrega);
+      const { error: individual } = await c
+        .from('acta_deliveries')
+        .upsert([fila], { onConflict: 'id' });
+
+      if (!individual) {
+        await db.put('deliveries', { ...entrega, sync: 'sincronizado' });
+        subidas++;
+        continue;
+      }
+      if (esErrorGlobal(individual)) {
+        return { subidas, conflictos, mensaje: traducirErrorDatos(individual) };
+      }
+      // 23505 = otro puesto ya la registró. No se reintenta más.
+      if (individual.code === '23505') {
         conflictos.push(entrega);
         await db.put('deliveries', { ...entrega, sync: 'conflicto' });
         continue;
       }
-      return { subidas, conflictos, mensaje: traducirErrorDatos(error) };
+      // Cualquier otra: queda pendiente y se reintenta en el próximo
+      // ciclo, pero no frena a las demás.
+      mensaje ??= traducirErrorDatos(individual);
     }
-
-    await db.put('deliveries', { ...entrega, sync: 'sincronizado' });
-    subidas++;
   }
 
-  return { subidas, conflictos };
+  return { subidas, conflictos, mensaje };
+}
+
+/** Errores de red, sesión, permisos o esquema: afectan a toda la cola. */
+function esErrorGlobal(error: { code?: string; message: string }): boolean {
+  if (error.code && ['42501', 'PGRST301', 'PGRST205', '42P01', '23503'].includes(error.code)) {
+    return true;
+  }
+  return /failed to fetch|networkerror|jwt|token is expired/i.test(error.message);
+}
+
+async function aFilaEntrega(entrega: Delivery): Promise<Record<string, unknown>> {
+  const firma = entrega.conFirma
+    ? await db.get<SignatureRecord>('signatures', entrega.id)
+    : undefined;
+
+  // Una entrega que dice tener firma pero perdió el trazo no puede subirse
+  // como firmada: el acta afirmaría algo que no puede mostrar.
+  const conFirmaReal = Boolean(entrega.conFirma && firma?.png);
+
+  return {
+    id: entrega.id,
+    event_id: entrega.eventId,
+    slot_id: entrega.slotId,
+    person_id: entrega.personId,
+    estado: entrega.estado,
+    nombre_firmante: entrega.nombreFirmante,
+    documento_firmante: entrega.documentoFirmante,
+    con_firma: conFirmaReal,
+    firma_png: firma?.png ?? null,
+    firma_trazos: firma?.trazos ?? null,
+    firma_ancho: firma?.ancho ?? null,
+    firma_alto: firma?.alto ?? null,
+    firmado_en: entrega.firmadoEn,
+    operador: entrega.operador,
+    dispositivo: entrega.dispositivo,
+    sello: entrega.sello,
+    observacion: entrega.observacion,
+    anulado_en: entrega.anuladoEn ?? null,
+    anulado_por: entrega.anuladoPor ?? null,
+    motivo_anulacion: entrega.motivoAnulacion ?? null,
+  };
 }
 
 /** Trae entregas registradas por otros puestos y las fusiona localmente. */
@@ -364,12 +408,19 @@ export async function contarEnNube(eventId: string): Promise<number | null> {
 
 /* ─── Traducción de errores ──────────────────────────────────────── */
 
+/** Marca los errores que solo se resuelven volviendo a iniciar sesión. */
+export const SESION_VENCIDA = 'SESION_VENCIDA';
+
 function traducirErrorDatos(error: { code?: string; message: string }): string {
+  // PGRST301 es token vencido o inválido, no falta de permisos: mezclarlos
+  // manda al operador a pedir permisos que ya tiene.
+  if (error.code === 'PGRST301' || /jwt|token is expired|invalid claim/i.test(error.message)) {
+    return `${SESION_VENCIDA}: la sesión de este dispositivo venció. Volvé a iniciar sesión; las entregas siguen guardadas acá.`;
+  }
   switch (error.code) {
     case '23503':
       return 'El evento todavía no está publicado en la nube. Se reintenta solo.';
     case '42501':
-    case 'PGRST301':
       return 'Esta cuenta no tiene permiso para escribir (rol «auditor» o inactiva).';
     case 'PGRST205':
     case '42P01':

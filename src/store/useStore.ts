@@ -17,6 +17,8 @@ import {
   publicarEstructura,
   sesionGuardada,
   subirEntregas,
+  SESION_VENCIDA,
+  type DatosEvento,
 } from '../lib/supabase';
 import type {
   Delivery,
@@ -80,6 +82,116 @@ async function asegurarDiasSinEntregas(eventId: string, dayIds: Set<string>): Pr
       'No se puede acortar el rango: una de las jornadas eliminadas tiene entregas registradas.',
     );
   }
+}
+
+/* ─── Sincronización de un evento ────────────────────────────────── */
+
+/** Huella de la estructura ya publicada, por evento. Evita reenviar el
+    padrón entero en cada firma: con 170 personas y 1.500 entregas eso
+    serían cientos de miles de filas y un límite de tasa asegurado. */
+const HUELLAS_KEY = 'acta.estructuraPublicada';
+
+function leerHuellas(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(HUELLAS_KEY) ?? '{}') as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function guardarHuella(eventId: string, huella: string): void {
+  try {
+    const todas = leerHuellas();
+    todas[eventId] = huella;
+    localStorage.setItem(HUELLAS_KEY, JSON.stringify(todas));
+  } catch {
+    /* sin almacenamiento: se republica la estructura, que es idempotente */
+  }
+}
+
+/** Hash barato y estable de la estructura completa del evento. */
+function huellaEstructura(datos: DatosEvento): string {
+  const texto = JSON.stringify([
+    datos.evento,
+    datos.dias,
+    datos.servicios,
+    datos.slots,
+    datos.personas,
+  ]);
+  let h = 2166136261;
+  for (let i = 0; i < texto.length; i++) {
+    h ^= texto.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36) + ':' + texto.length.toString(36);
+}
+
+interface ResultadoEvento {
+  cambios: number;
+  conflictos: number;
+  mensaje?: string;
+}
+
+/**
+ * Sube lo pendiente de un evento y, si es el abierto, baja lo de los
+ * otros puestos. `enMemoria` evita releer de IndexedDB el evento activo.
+ */
+async function sincronizarEvento(
+  eventId: string,
+  enMemoria: { eventos: EventRecord[]; dias: EventDay[]; servicios: Service[]; slots: Slot[]; personas: Person[] } | null,
+): Promise<ResultadoEvento> {
+  const datos = enMemoria
+    ? {
+        evento: enMemoria.eventos.find((e) => e.id === eventId)!,
+        dias: enMemoria.dias,
+        servicios: enMemoria.servicios,
+        slots: enMemoria.slots,
+        personas: enMemoria.personas,
+      }
+    : await leerEstructuraDeDisco(eventId);
+
+  if (!datos?.evento) return { cambios: 0, conflictos: 0 };
+
+  const huella = huellaEstructura(datos);
+  const yaPublicada = leerHuellas()[eventId] === huella;
+
+  // Publicamos la estructura solo si cambió. Si aun así una entrega
+  // rebota por clave foránea, forzamos la publicación y reintentamos:
+  // así el caso raro se resuelve solo y el caso común no paga el costo.
+  if (!yaPublicada) {
+    const est = await publicarEstructura(datos);
+    if (!est.ok) return { cambios: 0, conflictos: 0, mensaje: est.mensaje };
+    guardarHuella(eventId, huella);
+  }
+
+  let subida = await subirEntregas(eventId);
+  if (subida.mensaje?.includes('todavía no está publicado') && yaPublicada) {
+    const est = await publicarEstructura(datos);
+    if (est.ok) {
+      guardarHuella(eventId, huella);
+      subida = await subirEntregas(eventId);
+    }
+  }
+
+  const bajada = enMemoria ? await bajarEntregas(eventId) : { bajadas: 0, mensaje: undefined };
+
+  return {
+    cambios: subida.subidas + bajada.bajadas + subida.conflictos.length,
+    conflictos: subida.conflictos.length,
+    mensaje: subida.mensaje ?? bajada.mensaje,
+  };
+}
+
+async function leerEstructuraDeDisco(eventId: string): Promise<DatosEvento | null> {
+  const evento = await db.get<EventRecord>('events', eventId);
+  if (!evento) return null;
+  const [dias, servicios, slots, personas] = await Promise.all([
+    db.getByIndex<EventDay>('days', 'eventId', eventId),
+    db.getByIndex<Service>('services', 'eventId', eventId),
+    db.getByIndex<Slot>('slots', 'eventId', eventId),
+    db.getByIndex<Person>('people', 'eventId', eventId),
+  ]);
+  return { evento, dias, servicios, slots, personas };
 }
 
 export interface Toast {
@@ -240,64 +352,67 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async refrescarPendientes() {
-    const { eventoId } = get();
-    if (!eventoId) return;
-    const entregas = await db.getByIndex<Delivery>('deliveries', 'eventId', eventoId);
+    // Cuenta sobre TODOS los eventos, no solo el activo: una firma de un
+    // evento anterior que quedó sin subir tiene que seguir siendo visible.
+    const todas = await db.getAll<Delivery>('deliveries');
     set({
       sync: {
         ...get().sync,
-        pendientes: entregas.filter((e) => e.sync === 'pendiente').length,
-        conflictos: entregas.filter((e) => e.sync === 'conflicto').length,
+        pendientes: todas.filter((e) => e.sync === 'pendiente').length,
+        conflictos: todas.filter((e) => e.sync === 'conflicto').length,
       },
     });
   },
 
   async sincronizar(opciones) {
-    const { eventoId, eventos, dias, servicios, slots, personas, sesion, sync } = get();
-    if (!HAY_NUBE || !eventoId || !sesion || sync.sincronizando) return;
-
-    const evento = eventos.find((e) => e.id === eventoId);
-    if (!evento) return;
+    const { sesion, sync, eventoId } = get();
+    if (!HAY_NUBE || !sesion || sync.sincronizando) return;
 
     set({ sync: { ...get().sync, sincronizando: true, ultimoError: null } });
 
     try {
-      // La estructura viaja siempre primero: sin turnos ni personas en la
-      // nube, las entregas rebotarían por clave foránea y las firmas se
-      // quedarían acá. Es idempotente, así que repetirla no cuesta nada.
-      const estructura = await publicarEstructura({ evento, dias, servicios, slots, personas });
-      if (!estructura.ok) {
-        set({
-          sync: { ...get().sync, sincronizando: false, ultimoError: estructura.mensaje ?? null },
-        });
-        if (!opciones?.silencioso) {
-          get().toast({ tipo: 'error', titulo: 'No se pudo publicar el evento', detalle: estructura.mensaje });
-        }
-        return;
+      // Barremos todos los eventos con entregas pendientes, no solo el
+      // que está abierto. Cambiar de evento no puede dejar firmas
+      // varadas fuera del reporte.
+      const todas = await db.getAll<Delivery>('deliveries');
+      const objetivos = new Set(todas.filter((e) => e.sync === 'pendiente').map((e) => e.eventId));
+      // El evento abierto entra siempre, aunque no deba nada: es el que
+      // necesita bajar lo que registraron los otros puestos.
+      if (eventoId) objetivos.add(eventoId);
+
+      let error: string | null = null;
+      let conflictos = 0;
+      let cambios = 0;
+
+      for (const id of objetivos) {
+        const r = await sincronizarEvento(id, id === eventoId ? get() : null);
+        conflictos += r.conflictos;
+        cambios += r.cambios;
+        if (r.mensaje && !error) error = r.mensaje;
       }
 
-      const subida = await subirEntregas(eventoId);
-      const bajada = await bajarEntregas(eventoId);
-      const error = subida.mensaje ?? bajada.mensaje ?? null;
-
-      if (subida.subidas || bajada.bajadas || subida.conflictos.length) {
-        await get().cargarEvento(eventoId);
-      }
+      if (cambios && eventoId) await get().cargarEvento(eventoId);
       await get().refrescarPendientes();
+
+      // Una sesión vencida no se arregla reintentando: hay que volver a
+      // entrar. Soltamos la sesión para que aparezca el login, sin tocar
+      // las entregas locales, que siguen en cola.
+      const vencida = Boolean(error?.startsWith(SESION_VENCIDA));
+      if (vencida) set({ sesion: null });
 
       set({
         sync: {
           ...get().sync,
           sincronizando: false,
-          ultimoError: error,
+          ultimoError: vencida ? error!.slice(SESION_VENCIDA.length + 2) : error,
           ultimaOk: error ? get().sync.ultimaOk : new Date().toISOString(),
         },
       });
 
-      if (subida.conflictos.length && !opciones?.silencioso) {
+      if (conflictos && !opciones?.silencioso) {
         get().toast({
           tipo: 'error',
-          titulo: `${subida.conflictos.length} entrega(s) en conflicto`,
+          titulo: `${conflictos} entrega(s) en conflicto`,
           detalle: 'Otro puesto ya había registrado a esa persona en ese turno.',
         });
       }
@@ -306,7 +421,11 @@ export const useStore = create<State>((set, get) => ({
       }
     } catch (err) {
       set({
-        sync: { ...get().sync, sincronizando: false, ultimoError: err instanceof Error ? err.message : 'Error de red' },
+        sync: {
+          ...get().sync,
+          sincronizando: false,
+          ultimoError: err instanceof Error ? err.message : 'Error de red',
+        },
       });
     }
   },
