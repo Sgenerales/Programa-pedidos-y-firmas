@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { Campo, Confirmar, Modal, Vacio } from '../components/ui';
 import { useStore } from '../store/useStore';
-import { matrizCobertura, resumenTurno } from '../store/selectors';
+import { habilitadaEnTurno, matrizCobertura, resumenTurno } from '../store/selectors';
 import { reporteCompleto, respaldoJSON } from '../lib/exportar';
 import * as db from '../lib/idb';
 import { descargar, fechaCorta, fechaLarga, hora, iniciales, pct } from '../lib/util';
@@ -124,9 +124,11 @@ export function ReportesPage() {
             </div>
           </div>
           <div className="stat">
-            <div className="stat__label">Padrón activo</div>
+            <div className="stat__label">Personas registradas</div>
             <div className="stat__value">{activos.length}</div>
-            <div className="stat__foot">{personas.length - activos.length} inactivas</div>
+            <div className="stat__foot">
+              los totales diarios respetan la asistencia SI/NO
+            </div>
           </div>
           <div className="stat">
             <div className="stat__label">Anuladas</div>
@@ -292,8 +294,7 @@ export function ReportesPage() {
                       </td>
                       {ordenSlots.map((s) => {
                         const e = suyas?.get(s.id);
-                        const habilitada =
-                          !s.gruposHabilitados.length || s.gruposHabilitados.includes(p.grupo);
+                        const habilitada = habilitadaEnTurno(p, s);
                         return (
                           <td key={s.id} style={{ textAlign: 'center' }}>
                             {e ? (
@@ -422,6 +423,9 @@ function ActaModal({ slot, onCerrar }: { slot: Slot | null; onCerrar: () => void
         dias.find((d) => d.id === slot.dayId)?.etiqueta
       }`
     : 'Acta general del evento';
+  const personasEnPadron = slot
+    ? personas.filter((persona) => habilitadaEnTurno(persona, slot)).length
+    : personas.filter((persona) => persona.activo).length;
 
   return (
     <Modal
@@ -543,7 +547,7 @@ function ActaModal({ slot, onCerrar }: { slot: Slot | null; onCerrar: () => void
               de la entrega y permite verificar que el registro no fue alterado.
             </span>
             <span>
-              Personas en padrón: {personas.filter((p) => p.activo).length}
+              Personas en padrón: {personasEnPadron}
             </span>
           </footer>
         </div>

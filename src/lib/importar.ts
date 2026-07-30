@@ -234,7 +234,7 @@ function fechaValida(year: number, month: number, day: number): string {
 export function interpretarAsistencia(valorCrudo: string): 'si' | 'no' | 'invalido' {
   const valor = norm(valorCrudo);
   if (['si', 's', 'yes', 'y', 'x', '1', 'true'].includes(valor)) return 'si';
-  if (!valor || ['no', 'n', '0', 'false'].includes(valor)) return 'no';
+  if (['no', 'n', '0', 'false'].includes(valor)) return 'no';
   return 'invalido';
 }
 
@@ -341,16 +341,28 @@ export function clavePersona(
 }
 
 /** Planilla modelo para que el usuario tenga el formato esperado. */
-export async function plantillaPadron(): Promise<Blob> {
+export async function plantillaPadron(dias: EventDay[] = []): Promise<Blob> {
   const XLSX = await cargarXLSX();
+  const fechas = dias.map((dia) => {
+    const [year, month, day] = dia.fecha.split('-').map(Number);
+    return year && month && day ? `${day}/${month}/${year}` : dia.fecha;
+  });
   const filas = [
-    ['Nombre completo', 'Documento', 'Empresa', 'Grupo', 'Referencia', 'Teléfono'],
-    ['María Fernanda Acosta', '4.512.880', 'Tropical Tower', 'Staff', 'Torre A · Piso 3', '0981 123 456'],
-    ['Juan Ignacio Ramírez', '3.998.145', 'Proveedor Gastro', 'Proveedor', 'Cocina', ''],
-    ['Ana Lucía Benítez', '5.204.771', '', 'Invitado', 'Mesa 12', ''],
+    ['TIPO', 'ROL', 'NOMBRE', ...fechas, 'DOCUMENTO', 'REFERENCIA', 'TELEFONO'],
+    ['INTERNO', 'BOA', 'María Fernanda Acosta', ...fechas.map(() => 'SI'), '4.512.880', 'Torre A · Piso 3', '0981 123 456'],
+    ['STAFF', 'LOGÍSTICA', 'Juan Ignacio Ramírez', ...fechas.map((_, i) => (i === fechas.length - 1 ? 'NO' : 'SI')), '3.998.145', 'Cocina', ''],
+    ['EXTERNO', 'PROVEEDOR', 'Ana Lucía Benítez', ...fechas.map(() => 'SI'), '5.204.771', 'Mesa 12', ''],
   ];
   const ws = XLSX.utils.aoa_to_sheet(filas);
-  ws['!cols'] = [{ wch: 30 }, { wch: 14 }, { wch: 22 }, { wch: 16 }, { wch: 22 }, { wch: 16 }];
+  ws['!cols'] = [
+    { wch: 16 },
+    { wch: 22 },
+    { wch: 30 },
+    ...fechas.map(() => ({ wch: 12 })),
+    { wch: 14 },
+    { wch: 22 },
+    { wch: 16 },
+  ];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Padrón');
   const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });

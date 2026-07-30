@@ -102,7 +102,7 @@ export function PadronPage({ onIrAKiosko }: { onIrAKiosko: () => void }) {
                   </button>
                   <button
                     className="btn btn--ghost"
-                    onClick={async () => descargar('plantilla-padron.xlsx', await plantillaPadron())}
+                    onClick={async () => descargar('plantilla-padron.xlsx', await plantillaPadron(dias))}
                   >
                     <Icon name="hoja" size={16} />
                     Descargar plantilla
@@ -393,7 +393,7 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
           <>
             <button
               className="btn btn--quiet"
-              onClick={async () => descargar('plantilla-padron.xlsx', await plantillaPadron())}
+              onClick={async () => descargar('plantilla-padron.xlsx', await plantillaPadron(dias))}
             >
               <Icon name="hoja" size={15} />
               Descargar plantilla
@@ -543,8 +543,8 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
               [
                 ['nombre', 'Nombre completo', true],
                 ['documento', 'Documento / CI', false],
-                ['empresa', 'Empresa', false],
-                ['grupo', 'Grupo', false],
+                ['empresa', 'Tipo / procedencia', false],
+                ['grupo', 'Rol / función', false],
                 ['referencia', 'Referencia', false],
                 ['telefono', 'Teléfono', false],
               ] as [keyof ImportColumnMap, string, boolean][]

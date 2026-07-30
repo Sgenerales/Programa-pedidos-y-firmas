@@ -10,6 +10,7 @@ import {
   etiquetaTurno,
   filasKiosko,
   gruposDelPadron,
+  asisteEnDia,
   resumenTurno,
 } from '../store/selectors';
 import { suscribirEntregas } from '../lib/supabase';
@@ -252,7 +253,7 @@ export function KioskoPage({ onSalir }: { onSalir: () => void }) {
           </div>
           <div className="spacer" />
           {bloqueadas ? (
-            <span className="muted" title="Personas cuyo grupo no está habilitado en este turno">
+            <span className="muted" title="Personas que no asisten esta jornada o cuyo rol no está habilitado">
               {bloqueadas} fuera de este turno
             </span>
           ) : null}
@@ -275,6 +276,7 @@ export function KioskoPage({ onSalir }: { onSalir: () => void }) {
               indice={i}
               terminos={terminos}
               slotActivoId={slotActivo?.id ?? ''}
+              dayId={slotActivo?.dayId ?? ''}
               onFirmar={() => setEnFirma(fila)}
               onVerDetalle={() => setDetalle(fila)}
             />
@@ -398,6 +400,7 @@ function FilaPersona({
   indice,
   terminos,
   slotActivoId,
+  dayId,
   onFirmar,
   onVerDetalle,
 }: {
@@ -405,11 +408,13 @@ function FilaPersona({
   indice: number;
   terminos: string[];
   slotActivoId: string;
+  dayId: string;
   onFirmar: () => void;
   onVerDetalle: () => void;
 }) {
   const { person, entrega, habilitada, jornada } = fila;
   const clickeable = !entrega && habilitada;
+  const asiste = asisteEnDia(person, dayId);
 
   const meta = [person.documento, person.empresa, person.referencia].filter(Boolean);
 
@@ -426,7 +431,9 @@ function FilaPersona({
           ? `Registrado a las ${hora(entrega.firmadoEn)} por ${entrega.operador}`
           : habilitada
             ? 'Registrar entrega'
-            : `El grupo «${person.grupo}» no está habilitado en este turno`
+            : asiste
+              ? `El rol «${person.grupo}» no está habilitado en este turno`
+              : 'La lista indica que esta persona no asiste en esta jornada'
       }
     >
       <span className="pRow__avatar">{iniciales(person.nombre)}</span>
@@ -474,7 +481,7 @@ function FilaPersona({
             <Icon name="firma" size={19} />
           </span>
         ) : (
-          <span className="badge">No habilitado</span>
+          <span className="badge">{asiste ? 'Rol no habilitado' : 'No asiste hoy'}</span>
         )}
       </span>
     </button>

@@ -1,4 +1,9 @@
 import { fechaCorta, hora, slugArchivo } from './util';
+import {
+  asisteEnDia,
+  compararPersonas,
+  habilitadaEnTurno,
+} from '../store/selectors';
 import type { Delivery, EventDay, EventRecord, Person, Service, Slot } from '../types';
 
 /* SheetJS se carga bajo demanda: ver nota en lib/importar.ts.
@@ -80,11 +85,7 @@ function hojaResumen(X: XLSXMod, d: Datos): WorkSheet {
   ];
 
   for (const slot of ordenarSlots(d)) {
-    const habilitados = d.personas.filter(
-      (p) =>
-        p.activo &&
-        (!slot.gruposHabilitados.length || slot.gruposHabilitados.includes(p.grupo)),
-    ).length;
+    const habilitados = d.personas.filter((p) => habilitadaEnTurno(p, slot)).length;
     const entregados = activas.filter((e) => e.slotId === slot.id).length;
     filas.push([
       tituloSlot(d, slot),
@@ -123,7 +124,7 @@ function hojaMatriz(X: XLSXMod, d: Datos): WorkSheet {
     for (const s of slots) {
       const e = idx.get(`${s.id}|${p.id}`);
       if (e) total++;
-      fila.push(e ? hora(e.firmadoEn) : '—');
+      fila.push(e ? hora(e.firmadoEn) : habilitadaEnTurno(p, s) ? '—' : 'N/A');
     }
     fila.push(total);
     filas.push(fila);
@@ -196,8 +197,7 @@ function hojaFaltantes(X: XLSXMod, d: Datos): WorkSheet {
 
   for (const slot of ordenarSlots(d)) {
     for (const p of d.personas) {
-      if (!p.activo) continue;
-      if (slot.gruposHabilitados.length && !slot.gruposHabilitados.includes(p.grupo)) continue;
+      if (!habilitadaEnTurno(p, slot)) continue;
       if (idx.has(`${slot.id}|${p.id}`)) continue;
       filas.push([tituloSlot(d, slot), p.nombre, p.documento, p.empresa, p.grupo, p.referencia]);
     }
@@ -216,42 +216,46 @@ export async function exportarPadron(
 ): Promise<{ blob: Blob; nombre: string }> {
   const X = await cargarXLSX();
 
-  // Una columna por jornada con la asistencia declarada. `null` significa
-  // que la persona asiste a todas, que es el caso de los padrones sin
-  // columnas de fecha y de las altas manuales en piso.
+  // Conserva el mismo contrato que el importador nativo: TIPO, ROL,
+  // NOMBRE y una columna SI/NO por fecha. El archivo exportado se puede
+  // volver a importar sin remapearlo manualmente.
   const cabecera = [
-    'Nombre completo',
-    'Documento',
-    'Empresa',
-    'Grupo',
+    'TIPO',
+    'ROL',
+    'NOMBRE',
+    ...dias.map((d) => fechaEncabezado(d.fecha)),
+    'DOCUMENTO',
     'Referencia',
-    'Teléfono',
+    'TELEFONO',
     'Estado',
     'Origen',
-    ...dias.map((d) => `${d.etiqueta} · ${fechaCorta(d.fecha)}`),
   ];
 
   const filas: string[][] = [
     cabecera,
-    ...personas.map((p) => [
-      p.nombre,
-      p.documento,
+    ...[...personas].sort(compararPersonas).map((p) => [
       p.empresa,
       p.grupo,
+      p.nombre,
+      ...dias.map((d) => (asisteEnDia(p, d.id) ? 'SI' : 'NO')),
+      p.documento,
       p.referencia,
       p.telefono,
       p.activo ? 'Activo' : 'Inactivo',
       p.origen === 'manual' ? 'Alta manual' : 'Importado',
-      ...dias.map((d) =>
-        !Array.isArray(p.diasHabilitados) || p.diasHabilitados.includes(d.id) ? 'Sí' : '—',
-      ),
     ]),
   ];
   const ws = X.utils.aoa_to_sheet(filas);
-  anchos(ws, [30, 14, 22, 16, 20, 16, 10, 13, ...dias.map(() => 14)]);
+  anchos(ws, [16, 22, 30, ...dias.map(() => 12), 14, 20, 16, 10, 13]);
   const wb = X.utils.book_new();
   X.utils.book_append_sheet(wb, ws, 'Padrón');
   return { blob: libroABlob(X, wb), nombre: `padron-${slugArchivo(evento.nombre)}.xlsx` };
+}
+
+function fechaEncabezado(fechaISO: string): string {
+  const [year, month, day] = fechaISO.split('-').map(Number);
+  if (!year || !month || !day) return fechaISO;
+  return `${day}/${month}/${year}`;
 }
 
 /** Copia de seguridad completa del evento, firmas incluidas. */
