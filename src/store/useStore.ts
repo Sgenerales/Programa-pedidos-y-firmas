@@ -12,6 +12,7 @@ import { compararServiciosOperativos, PLANTILLAS_SERVICIO } from '../lib/catalog
 import { compararPersonas } from './selectors';
 import { HAY_NUBE } from '../lib/config';
 import {
+  anularEntregaEnNube,
   bajarEstructuras,
   bajarEntregas,
   cerrarSesion as cerrarSesionNube,
@@ -1093,18 +1094,20 @@ export const useStore = create<State>((set, get) => ({
   async anularEntrega(deliveryId, motivo) {
     const entrega = get().entregas.find((e) => e.id === deliveryId);
     if (!entrega) return;
+    const resultado = await anularEntregaEnNube(deliveryId, motivo);
+    if (!resultado.ok) throw new Error(resultado.mensaje);
+
     const anulada: Delivery = {
       ...entrega,
       estado: 'anulado',
-      anuladoEn: new Date().toISOString(),
-      anuladoPor: get().settings.operador.trim() || 'Sin identificar',
+      anuladoEn: resultado.fecha,
+      anuladoPor: resultado.responsable,
       motivoAnulacion: motivo,
-      sync: 'pendiente',
+      sync: 'sincronizado',
     };
     await db.put('deliveries', anulada);
     set({ entregas: get().entregas.map((e) => (e.id === deliveryId ? anulada : e)) });
     void get().refrescarPendientes();
-    void get().sincronizar({ silencioso: true });
   },
 
   obtenerFirma(deliveryId) {

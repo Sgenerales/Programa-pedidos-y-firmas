@@ -136,6 +136,97 @@ export async function cerrarSesion(): Promise<void> {
   await c?.auth.signOut();
 }
 
+export type ResultadoAutorizacion =
+  | { ok: true }
+  | { ok: false; mensaje: string };
+
+/**
+ * Revalida la contraseña de la cuenta activa y confirma su rol directamente
+ * en la base. La clave nunca se guarda ni sale de Supabase Auth.
+ */
+export async function verificarClaveAdministrador(
+  password: string,
+): Promise<ResultadoAutorizacion> {
+  const c = await obtenerCliente();
+  if (!c) return { ok: false, mensaje: 'La anulación segura necesita conexión con Supabase.' };
+  if (!password) return { ok: false, mensaje: 'Ingresá la contraseña administradora.' };
+
+  const { data: usuarioActual, error: errorUsuario } = await c.auth.getUser();
+  const usuario = usuarioActual.user;
+  if (errorUsuario || !usuario?.email) {
+    return { ok: false, mensaje: 'La sesión venció. Volvé a iniciar sesión antes de anular.' };
+  }
+
+  const { data: miembro, error: errorMiembro } = await c
+    .from('acta_members')
+    .select('user_id, role, activo')
+    .eq('user_id', usuario.id)
+    .maybeSingle();
+
+  if (errorMiembro) return { ok: false, mensaje: traducirErrorDatos(errorMiembro) };
+  if (!miembro?.activo || miembro.role !== 'admin') {
+    return { ok: false, mensaje: 'Esta acción requiere una cuenta administradora activa.' };
+  }
+
+  const { data, error } = await c.auth.signInWithPassword({
+    email: usuario.email,
+    password,
+  });
+  if (error) {
+    const traducido = traducirErrorAuth(error.message);
+    return {
+      ok: false,
+      mensaje:
+        traducido.campo === 'password'
+          ? 'La contraseña administradora no es correcta.'
+          : traducido.mensaje,
+    };
+  }
+  if (data.user?.id !== usuario.id) {
+    return { ok: false, mensaje: 'La contraseña no corresponde a la cuenta administradora activa.' };
+  }
+
+  return { ok: true };
+}
+
+export type ResultadoAnulacion =
+  | { ok: true; fecha: string; responsable: string }
+  | { ok: false; mensaje: string };
+
+/** Anula en Postgres primero; la evidencia de firma permanece intacta. */
+export async function anularEntregaEnNube(
+  deliveryId: string,
+  motivo: string,
+): Promise<ResultadoAnulacion> {
+  const c = await obtenerCliente();
+  if (!c) return { ok: false, mensaje: 'La anulación segura necesita conexión con Supabase.' };
+
+  const { data, error } = await c.rpc('acta_anular_entrega', {
+    p_delivery_id: deliveryId,
+    p_motivo: motivo.trim(),
+  });
+
+  if (error) {
+    return {
+      ok: false,
+      mensaje:
+        error.code === '42501'
+          ? 'Supabase rechazó la anulación: se requiere una cuenta administradora activa.'
+          : traducirErrorDatos(error),
+    };
+  }
+  const fila = Array.isArray(data) ? data[0] : null;
+  if (!fila?.fecha || !fila?.responsable) {
+    return { ok: false, mensaje: 'Supabase no confirmó la anulación.' };
+  }
+
+  return {
+    ok: true,
+    fecha: String(fila.fecha),
+    responsable: String(fila.responsable),
+  };
+}
+
 function nombreDesde(metadata: Record<string, unknown> | undefined, email: string): string {
   const guardado = (metadata?.acta_nombre ?? metadata?.full_name ?? metadata?.name) as
     | string

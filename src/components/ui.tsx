@@ -112,6 +112,8 @@ interface ConfirmProps {
   mensaje: ReactNode;
   etiquetaOk?: string;
   peligroso?: boolean;
+  procesando?: boolean;
+  deshabilitado?: boolean;
   onCancelar: () => void;
   onConfirmar: () => void;
 }
@@ -122,6 +124,8 @@ export function Confirmar({
   mensaje,
   etiquetaOk = 'Confirmar',
   peligroso,
+  procesando,
+  deshabilitado,
   onCancelar,
   onConfirmar,
 }: ConfirmProps) {
@@ -129,18 +133,20 @@ export function Confirmar({
     <Modal
       abierto={abierto}
       onCerrar={onCancelar}
+      bloqueado={procesando}
       titulo={titulo}
       pie={
         <>
           <div className="spacer" />
-          <button className="btn btn--ghost" onClick={onCancelar}>
+          <button className="btn btn--ghost" onClick={onCancelar} disabled={procesando}>
             Cancelar
           </button>
           <button
             className={peligroso ? 'btn btn--danger' : 'btn btn--primary'}
             onClick={onConfirmar}
+            disabled={procesando || deshabilitado}
           >
-            {etiquetaOk}
+            {procesando ? 'Verificando…' : etiquetaOk}
           </button>
         </>
       }
@@ -219,7 +225,7 @@ export function Campo({
     <label className="field">
       {etiqueta ? <span className="field__label">{etiqueta}</span> : null}
       {children}
-      {error ? <span className="field__error">{error}</span> : ayuda ? <span className="field__hint">{ayuda}</span> : null}
+      {error ? <span className="field__error" role="alert">{error}</span> : ayuda ? <span className="field__hint">{ayuda}</span> : null}
     </label>
   );
 }

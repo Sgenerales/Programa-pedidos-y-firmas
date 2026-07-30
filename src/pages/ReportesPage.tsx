@@ -5,6 +5,7 @@ import { useStore } from '../store/useStore';
 import { habilitadaEnTurno, matrizCobertura, resumenTurno } from '../store/selectors';
 import { reporteCompleto, respaldoJSON } from '../lib/exportar';
 import * as db from '../lib/idb';
+import { verificarClaveAdministrador } from '../lib/supabase';
 import { descargar, fechaCorta, fechaLarga, hora, iniciales, pct } from '../lib/util';
 import type { Delivery, SignatureRecord, Slot } from '../types';
 
@@ -17,14 +18,45 @@ export function ReportesPage() {
   const personas = useStore((s) => s.personas);
   const entregas = useStore((s) => s.entregas);
   const anularEntrega = useStore((s) => s.anularEntrega);
+  const sesion = useStore((s) => s.sesion);
   const toast = useStore((s) => s.toast);
 
   const [actaSlot, setActaSlot] = useState<Slot | 'todos' | null>(null);
   const [aAnular, setAAnular] = useState<Delivery | null>(null);
   const [motivo, setMotivo] = useState('');
+  const [claveAdmin, setClaveAdmin] = useState('');
+  const [verClave, setVerClave] = useState(false);
+  const [errorAnulacion, setErrorAnulacion] = useState('');
+  const [anulando, setAnulando] = useState(false);
   const [exportando, setExportando] = useState(false);
 
   const evento = eventos.find((e) => e.id === eventoId);
+  const puedeAnular = sesion?.rol === 'admin';
+
+  function cerrarAnulacion() {
+    if (anulando) return;
+    setAAnular(null);
+    setMotivo('');
+    setClaveAdmin('');
+    setVerClave(false);
+    setErrorAnulacion('');
+  }
+
+  function solicitarAnulacion(entrega: Delivery) {
+    if (!puedeAnular) {
+      toast({
+        tipo: 'error',
+        titulo: 'Acción reservada',
+        detalle: 'Sólo una cuenta administradora puede anular firmas.',
+      });
+      return;
+    }
+    setAAnular(entrega);
+    setMotivo('');
+    setClaveAdmin('');
+    setVerClave(false);
+    setErrorAnulacion('');
+  }
 
   const activas = useMemo(() => entregas.filter((e) => e.estado === 'entregado'), [entregas]);
   const activos = useMemo(() => personas.filter((p) => p.activo), [personas]);
@@ -298,14 +330,23 @@ export function ReportesPage() {
                         return (
                           <td key={s.id} style={{ textAlign: 'center' }}>
                             {e ? (
-                              <button
-                                className="badge badge--ok"
-                                style={{ cursor: 'pointer' }}
-                                onClick={() => setAAnular(e)}
-                                title={`${e.operador} · sello ${e.sello}. Tocá para anular.`}
-                              >
-                                {hora(e.firmadoEn)}
-                              </button>
+                              puedeAnular ? (
+                                <button
+                                  className="badge badge--ok"
+                                  style={{ cursor: 'pointer' }}
+                                  onClick={() => solicitarAnulacion(e)}
+                                  title={`${e.operador} · sello ${e.sello}. Abrir anulación segura.`}
+                                >
+                                  {hora(e.firmadoEn)}
+                                </button>
+                              ) : (
+                                <span
+                                  className="badge badge--ok"
+                                  title={`${e.operador} · sello ${e.sello}`}
+                                >
+                                  {hora(e.firmadoEn)}
+                                </span>
+                              )
                             ) : habilitada ? (
                               <span style={{ color: 'var(--fg-4)' }}>·</span>
                             ) : (
@@ -329,15 +370,19 @@ export function ReportesPage() {
       {actaSlot ? (
         <ActaModal
           slot={actaSlot === 'todos' ? null : actaSlot}
+          puedeAnular={puedeAnular}
+          onAnular={solicitarAnulacion}
           onCerrar={() => setActaSlot(null)}
         />
       ) : null}
 
       <Confirmar
         abierto={Boolean(aAnular)}
-        titulo="Anular entrega"
+        titulo="Anular firma"
         peligroso
-        etiquetaOk="Anular"
+        etiquetaOk="Anular firma"
+        procesando={anulando}
+        deshabilitado={motivo.trim().length < 3 || !claveAdmin}
         mensaje={
           <>
             <p style={{ marginBottom: 14 }}>
@@ -345,27 +390,83 @@ export function ReportesPage() {
               <strong>{aAnular ? hora(aAnular.firmadoEn) : ''}</strong>. El registro y la firma se
               conservan: quedan marcados como anulados con el motivo.
             </p>
-            <Campo etiqueta="Motivo de la anulación">
+            <div className="notice notice--warn" style={{ marginBottom: 16 }}>
+              <span className="notice__icon">
+                <Icon name="candado" size={17} />
+              </span>
+              <span>
+                Esta acción requiere conexión y la contraseña de la cuenta administradora activa.
+              </span>
+            </div>
+            <Campo etiqueta="Motivo de la anulación" ayuda="Escribí al menos 3 caracteres.">
               <input
                 className="input"
                 value={motivo}
                 autoFocus
+                disabled={anulando}
                 placeholder="Ej: se registró a la persona equivocada"
-                onChange={(e) => setMotivo(e.target.value)}
+                onChange={(e) => {
+                  setMotivo(e.target.value);
+                  setErrorAnulacion('');
+                }}
               />
+            </Campo>
+            <Campo
+              etiqueta={`Contraseña administradora${sesion?.email ? ` · ${sesion.email}` : ''}`}
+              error={errorAnulacion}
+            >
+              <div className="secureInput">
+                <input
+                  className="input"
+                  type={verClave ? 'text' : 'password'}
+                  value={claveAdmin}
+                  disabled={anulando}
+                  autoComplete="current-password"
+                  placeholder="Ingresá tu contraseña"
+                  onChange={(e) => {
+                    setClaveAdmin(e.target.value);
+                    setErrorAnulacion('');
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn btn--quiet btn--sm secureInput__toggle"
+                  onClick={() => setVerClave((valor) => !valor)}
+                  disabled={anulando}
+                  aria-label={verClave ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                >
+                  {verClave ? 'Ocultar' : 'Mostrar'}
+                </button>
+              </div>
             </Campo>
           </>
         }
-        onCancelar={() => {
-          setAAnular(null);
-          setMotivo('');
-        }}
+        onCancelar={cerrarAnulacion}
         onConfirmar={async () => {
-          if (!aAnular) return;
-          await anularEntrega(aAnular.id, motivo.trim() || 'Sin motivo declarado');
-          toast({ tipo: 'info', titulo: 'Entrega anulada', detalle: 'La persona vuelve a figurar como pendiente.' });
-          setAAnular(null);
-          setMotivo('');
+          if (!aAnular || motivo.trim().length < 3 || !claveAdmin) return;
+          setAnulando(true);
+          setErrorAnulacion('');
+          try {
+            const autorizacion = await verificarClaveAdministrador(claveAdmin);
+            if (!autorizacion.ok) {
+              setErrorAnulacion(autorizacion.mensaje);
+              return;
+            }
+            await anularEntrega(aAnular.id, motivo.trim());
+            toast({
+              tipo: 'info',
+              titulo: 'Firma anulada',
+              detalle: 'La evidencia quedó en el historial y la persona vuelve a figurar como pendiente.',
+            });
+            setAAnular(null);
+            setMotivo('');
+            setClaveAdmin('');
+            setVerClave(false);
+          } catch (err) {
+            setErrorAnulacion(msg(err));
+          } finally {
+            setAnulando(false);
+          }
         }}
       />
     </main>
@@ -374,7 +475,17 @@ export function ReportesPage() {
 
 /* ═══ Acta imprimible ══════════════════════════════════════════════ */
 
-function ActaModal({ slot, onCerrar }: { slot: Slot | null; onCerrar: () => void }) {
+function ActaModal({
+  slot,
+  puedeAnular,
+  onAnular,
+  onCerrar,
+}: {
+  slot: Slot | null;
+  puedeAnular: boolean;
+  onAnular: (entrega: Delivery) => void;
+  onCerrar: () => void;
+}) {
   const eventos = useStore((s) => s.eventos);
   const eventoId = useStore((s) => s.eventoId);
   const dias = useStore((s) => s.dias);
@@ -491,6 +602,7 @@ function ActaModal({ slot, onCerrar }: { slot: Slot | null; onCerrar: () => void
                 <th style={{ width: 54 }}>Hora</th>
                 <th style={{ width: 160 }}>Firma</th>
                 <th style={{ width: 92 }}>Sello</th>
+                <th className="no-print" style={{ width: 110 }}>Acción</th>
               </tr>
             </thead>
             <tbody>
@@ -534,6 +646,25 @@ function ActaModal({ slot, onCerrar }: { slot: Slot | null; onCerrar: () => void
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: '#6b6455' }}>
                       {e.sello}
                       <div>{e.operador}</div>
+                    </td>
+                    <td className="no-print">
+                      {e.estado === 'anulado' ? (
+                        <span className="badge badge--danger">Anulada</span>
+                      ) : (
+                        <button
+                          className="btn btn--danger btn--sm"
+                          onClick={() => onAnular(e)}
+                          disabled={!puedeAnular}
+                          title={
+                            puedeAnular
+                              ? 'Anular con contraseña administradora'
+                              : 'Sólo una cuenta administradora puede anular'
+                          }
+                        >
+                          <Icon name="candado" size={14} />
+                          Anular
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );

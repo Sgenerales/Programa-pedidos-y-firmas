@@ -1986,6 +1986,20 @@ a {
   mix-blend-mode: multiply;
 }
 
+.secureInput {
+  position: relative;
+}
+.secureInput .input {
+  padding-right: 92px;
+}
+.secureInput__toggle {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  min-height: 36px;
+  transform: translateY(-50%);
+}
+
 /* ═══ Utilidades ═════════════════════════════════════════════════ */
 
 .sr {
@@ -2063,6 +2077,10 @@ a {
   }
   .page {
     padding: 20px 18px 48px;
+  }
+  .secureInput__toggle,
+  .acta .btn--sm {
+    min-height: 44px;
   }
 }
 
