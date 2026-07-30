@@ -316,7 +316,6 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
   const [mapa, setMapa] = useState<ImportColumnMap | null>(null);
   const [colApellido, setColApellido] = useState('');
   const [ordenNombre, setOrdenNombre] = useState<'nombre-apellido' | 'apellido-nombre'>('nombre-apellido');
-  const [omitirYaExistentes, setOmitirYaExistentes] = useState(true);
   const [arrastrando, setArrastrando] = useState(false);
   const [error, setError] = useState('');
   const [guardando, setGuardando] = useState(false);
@@ -328,7 +327,6 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
     setArchivo(null);
     setMapa(null);
     setColApellido('');
-    setOmitirYaExistentes(true);
     setError('');
   }
 
@@ -375,14 +373,9 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
   const dupArchivo = preview.filter((r) => r.estado === 'duplicado-archivo');
   const dupPadron = preview.filter((r) => r.estado === 'duplicado-padron');
   const sinNombre = preview.filter((r) => r.estado === 'sin-nombre');
-  // Las coincidencias dentro del propio Excel representan filas reales de
-  // la lista y se conservan. Sólo se omiten por defecto las personas que
-  // ya estaban cargadas antes de abrir el archivo.
-  const aImportar = preview.filter(
-    (r) =>
-      r.estado !== 'sin-nombre' &&
-      (!omitirYaExistentes || r.estado !== 'duplicado-padron'),
-  );
+  // Una identidad se carga una sola vez: se excluyen tanto las filas
+  // repetidas dentro del Excel como quienes ya existen en el padrón.
+  const aImportar = preview.filter((r) => r.estado === 'nuevo');
 
   return (
     <Modal
@@ -670,9 +663,9 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
       {paso === 'revision' ? (
         <>
           <div className="grid grid--4" style={{ marginBottom: 16 }}>
-            <ResumenImport valor={preview.length - sinNombre.length} etiqueta="filas válidas" tono="ok" />
+            <ResumenImport valor={aImportar.length} etiqueta="personas únicas" tono="ok" />
             <ResumenImport valor={dupPadron.length} etiqueta="ya en el padrón" tono="warn" />
-            <ResumenImport valor={dupArchivo.length} etiqueta="coincidencias internas" tono="warn" />
+            <ResumenImport valor={dupArchivo.length} etiqueta="duplicadas en el archivo" tono="warn" />
             <ResumenImport valor={sinNombre.length} etiqueta="sin nombre (se omiten)" tono="danger" />
           </div>
 
@@ -682,8 +675,10 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
                 <Icon name="alerta" size={16} />
               </span>
               <span>
-                Hay {dupArchivo.length} fila(s) que coinciden dentro del Excel. Se conservarán para
-                respetar las {preview.length - sinNombre.length} personas de la lista original.
+                Se {dupArchivo.length === 1 ? 'detectó' : 'detectaron'} {dupArchivo.length}{' '}
+                {dupArchivo.length === 1 ? 'duplicado' : 'duplicados'} en el Excel:{' '}
+                <strong>{dupArchivo.slice(0, 3).map((fila) => fila.nombre).join(', ')}</strong>
+                {dupArchivo.length > 3 ? '…' : ''}. No se {dupArchivo.length === 1 ? 'importará' : 'importarán'}.
               </span>
             </div>
           ) : null}
@@ -707,17 +702,14 @@ function ImportarModal({ abierto, onCerrar }: { abierto: boolean; onCerrar: () =
           ) : null}
 
           {dupPadron.length > 0 ? (
-            <label className="switch" style={{ marginBottom: 14 }}>
-              <input
-                type="checkbox"
-                checked={omitirYaExistentes}
-                onChange={(e) => setOmitirYaExistentes(e.target.checked)}
-              />
-              <span className="switch__track" />
-              <span className="switch__label">
-                Omitir personas que ya existen en el padrón (recomendado).
+            <div className="notice notice--warn" style={{ marginBottom: 14 }}>
+              <span className="notice__icon">
+                <Icon name="alerta" size={16} />
               </span>
-            </label>
+              <span>
+                También se omitirán {dupPadron.length} persona(s) que ya existen en el padrón.
+              </span>
+            </div>
           ) : null}
 
           <div className="tableWrap" style={{ maxHeight: 330 }}>
