@@ -20,8 +20,8 @@ const VEL_TOPE = 2.1;
 export interface SignaturePadHandle {
   limpiar: () => void;
   estaVacio: () => boolean;
-  /** PNG recortado al trazo, fondo transparente, 2× para impresión. */
-  exportar: () => { png: string; trazos: Stroke[]; ancho: number; alto: number } | null;
+  /** Trazos cuantizados. La imagen se deriva de acá cuando hace falta. */
+  exportar: () => { trazos: Stroke[]; ancho: number; alto: number } | null;
 }
 
 interface Props {
@@ -198,10 +198,11 @@ export function SignaturePad({ ref, onCambio, deshabilitado, leyenda }: Props) {
         const trazos = trazosRef.current.filter((t) => t.length > 0);
         if (!trazos.length) return null;
         const wrap = wrapRef.current;
-        const ancho = wrap?.clientWidth ?? 600;
-        const alto = wrap?.clientHeight ?? 240;
-        const png = renderizarPNG(trazos, ancho, alto);
-        return { png, trazos, ancho, alto };
+        return {
+          trazos: comprimirTrazos(trazos),
+          ancho: wrap?.clientWidth ?? 600,
+          alto: wrap?.clientHeight ?? 240,
+        };
       },
     }),
     [marcar, redibujar],
@@ -315,4 +316,96 @@ function renderizarPNG(trazos: Stroke[], anchoLienzo: number, altoLienzo: number
 /** Re-render de una firma guardada, para reportes y actas. */
 export function firmaADataURL(trazos: Stroke[], ancho: number, alto: number): string {
   return renderizarPNG(trazos, ancho, alto);
+}
+
+/* ─── Compresión de trazos ───────────────────────────────────────── */
+
+/**
+ * Reduce el peso de una firma sin que se note a simple vista.
+ *
+ * Un evento de 2.000 personas con 9 servicios son 18.000 firmas: cada
+ * byte de más se multiplica por eso. Dos medidas, ambas conservadoras:
+ *
+ * 1. Descarta puntos que caen casi sobre la recta entre sus vecinos
+ *    (Ramer–Douglas–Peucker). Un trazo capturado a 120 Hz tiene muchos
+ *    puntos redundantes; quitarlos no cambia la curva dibujada.
+ * 2. Redondea a un decimal en posición y dos en grosor. Por debajo de
+ *    eso no hay diferencia visible ni en impresión.
+ */
+export function comprimirTrazos(trazos: Stroke[]): Stroke[] {
+  const TOLERANCIA = 0.45; // px de desvío admitido respecto de la recta
+  return trazos
+    .map((trazo) => {
+      const simplificado = trazo.length > 2 ? simplificar(trazo, TOLERANCIA) : trazo;
+      return simplificado.map((p) => ({
+        x: Math.round(p.x * 10) / 10,
+        y: Math.round(p.y * 10) / 10,
+        w: Math.round(p.w * 100) / 100,
+      }));
+    })
+    .filter((t) => t.length > 0);
+}
+
+function simplificar(puntos: StrokePoint[], tolerancia: number): StrokePoint[] {
+  const primero = puntos[0];
+  const ultimo = puntos[puntos.length - 1];
+  let maxDist = 0;
+  let indice = 0;
+
+  for (let i = 1; i < puntos.length - 1; i++) {
+    const d = distanciaARecta(puntos[i], primero, ultimo);
+    if (d > maxDist) {
+      maxDist = d;
+      indice = i;
+    }
+  }
+
+  if (maxDist <= tolerancia) return [primero, ultimo];
+  return [
+    ...simplificar(puntos.slice(0, indice + 1), tolerancia).slice(0, -1),
+    ...simplificar(puntos.slice(indice), tolerancia),
+  ];
+}
+
+function distanciaARecta(p: StrokePoint, a: StrokePoint, b: StrokePoint): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const largo = Math.hypot(dx, dy);
+  if (largo < 1e-6) return Math.hypot(p.x - a.x, p.y - a.y);
+  return Math.abs(dy * p.x - dx * p.y + b.x * a.y - b.y * a.x) / largo;
+}
+
+/* ─── Render bajo demanda ────────────────────────────────────────── */
+
+/** Evita redibujar la misma firma en cada repintado de una tabla larga. */
+const cacheRender = new Map<string, string>();
+
+/**
+ * Imagen de una firma guardada. Prefiere los trazos: si existen, se
+ * redibuja a la resolución que haga falta. El `png` solo se usa como
+ * respaldo para registros antiguos que ya no conservan vectores.
+ */
+export function imagenDeFirma(firma: {
+  id?: string;
+  png?: string;
+  trazos?: Stroke[];
+  ancho?: number;
+  alto?: number;
+}): string | null {
+  const trazos = firma.trazos?.filter((t) => t.length > 0) ?? [];
+  if (!trazos.length) return firma.png || null;
+
+  const clave = firma.id ?? '';
+  if (clave) {
+    const guardada = cacheRender.get(clave);
+    if (guardada) return guardada;
+  }
+
+  const png = renderizarPNG(trazos, firma.ancho || 600, firma.alto || 240);
+  if (clave && png) {
+    // Techo simple: en un acta de 2.000 firmas no queremos retenerlas todas.
+    if (cacheRender.size > 300) cacheRender.clear();
+    cacheRender.set(clave, png);
+  }
+  return png || firma.png || null;
 }

@@ -355,7 +355,6 @@ interface State {
     personId: string;
     slotId: string;
     trazos: Stroke[];
-    png: string;
     ancho: number;
     alto: number;
     observacion?: string;
@@ -977,7 +976,7 @@ export const useStore = create<State>((set, get) => ({
 
   /* ═══ Operación ═════════════════════════════════════════════════ */
 
-  async registrarEntrega({ personId, slotId, trazos, png, ancho, alto, observacion }) {
+  async registrarEntrega({ personId, slotId, trazos, ancho, alto, observacion }) {
     const { personas, slots, eventoId, settings } = get();
     const persona = personas.find((p) => p.id === personId);
     const slot = slots.find((s) => s.id === slotId);
@@ -1015,15 +1014,10 @@ export const useStore = create<State>((set, get) => ({
       return { ok: false, motivo: 'error', mensaje: 'La persona no está habilitada para este turno.' };
     }
 
-    const tieneTrazo = trazos.some((trazo) => trazo.length > 0);
-    if (
-      servicio.requiereFirma &&
-      (!tieneTrazo ||
-        !png.startsWith('data:image/png') ||
-        png.length < 100 ||
-        ancho <= 0 ||
-        alto <= 0)
-    ) {
+    // La firma válida se mide sobre la geometría, no sobre la imagen: un
+    // trazo con puntos suficientes y un lienzo con dimensiones reales.
+    const puntos = trazos.reduce((n, trazo) => n + trazo.length, 0);
+    if (servicio.requiereFirma && (puntos < 2 || ancho <= 0 || alto <= 0)) {
       return {
         ok: false,
         motivo: 'error',
@@ -1043,7 +1037,8 @@ export const useStore = create<State>((set, get) => ({
       persona.nombre,
       persona.documento,
       firmadoEn,
-      png.length,
+      // El sello cubre la geometría de la firma, no su imagen.
+      trazos.reduce((n, t) => n + t.length, 0),
     ]);
 
     const delivery: Delivery = {
@@ -1064,7 +1059,7 @@ export const useStore = create<State>((set, get) => ({
     };
 
     const firma: SignatureRecord | null = conFirma
-      ? { id, eventId: eventoId, png, trazos, ancho, alto }
+      ? { id, eventId: eventoId, trazos, ancho, alto }
       : null;
 
     try {

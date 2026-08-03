@@ -161,6 +161,22 @@ create index if not exists acta_people_event_idx on public.acta_people(event_id)
 -- Idempotente para instalaciones anteriores a la asistencia por jornada.
 alter table public.acta_people add column if not exists dias_habilitados text[];
 
+-- Idempotente: instalaciones anteriores exigían el PNG en el check.
+do $$
+begin
+  alter table public.acta_deliveries drop constraint if exists acta_deliveries_firma_valida;
+  alter table public.acta_deliveries
+    add constraint acta_deliveries_firma_valida check (
+      not con_firma
+      or (
+        firma_trazos is not null
+        and jsonb_array_length(firma_trazos) > 0
+        and coalesce(firma_ancho, 0) > 0
+        and coalesce(firma_alto, 0) > 0
+      )
+    );
+end $$;
+
 create table if not exists public.acta_deliveries (
   id                 text primary key,
   event_id           text not null references public.acta_events(id) on delete cascade,
@@ -184,11 +200,15 @@ create table if not exists public.acta_deliveries (
   anulado_por        text,
   motivo_anulacion   text,
   constraint acta_deliveries_turno_persona_unico unique (slot_id, person_id),
+  -- La firma son los trazos, no la imagen. Un PNG pesa ~21 KB y sirve a
+  -- una sola resolución; los mismos trazos ocupan ~1 KB y se redibujan
+  -- nítidos a cualquier tamaño. En un evento de 2.000 personas con 9
+  -- servicios esa diferencia son cientos de megabytes.
   constraint acta_deliveries_firma_valida check (
     not con_firma
     or (
-      firma_png is not null
-      and length(firma_png) > 100
+      firma_trazos is not null
+      and jsonb_array_length(firma_trazos) > 0
       and coalesce(firma_ancho, 0) > 0
       and coalesce(firma_alto, 0) > 0
     )

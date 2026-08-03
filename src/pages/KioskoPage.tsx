@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { Modal, Vacio } from '../components/ui';
 import { PersonaModal } from './PadronPage';
-import { SignaturePad, type SignaturePadHandle } from '../components/SignaturePad';
+import { SignaturePad, imagenDeFirma, type SignaturePadHandle } from '../components/SignaturePad';
 import { useStore } from '../store/useStore';
 import {
   buscar,
@@ -14,7 +14,7 @@ import {
   ordenarSlotsPorServicio,
   resumenTurno,
 } from '../store/selectors';
-import { suscribirEntregas } from '../lib/supabase';
+import { suscribirEntregas, bajarFirmas } from '../lib/supabase';
 import { HAY_NUBE } from '../lib/config';
 import { SyncPill } from '../components/SyncPill';
 import { fechaCorta, hora, hoyISO, iniciales, norm, pct } from '../lib/util';
@@ -554,7 +554,6 @@ function ModalFirma({
         personId: fila.person.id,
         slotId: slot.id,
         trazos: exportado?.trazos ?? [],
-        png: exportado?.png ?? '',
         ancho: exportado?.ancho ?? 0,
         alto: exportado?.alto ?? 0,
         observacion,
@@ -769,20 +768,26 @@ function DetalleEntrega({ fila, onCerrar }: { fila: PersonRow; onCerrar: () => v
   useEffect(() => {
     let vivo = true;
     setCargandoFirma(true);
-    void obtenerFirma(entrega.id)
-      .then((f) => {
-        if (vivo) setPng(f?.png || null);
-      })
-      .catch(() => {
+    void (async () => {
+      try {
+        let f = await obtenerFirma(entrega.id);
+        // Firma registrada en otra tablet: los trazos no viajan en la
+        // sincronización periódica, así que la pedimos recién ahora.
+        if (!f && entrega.conFirma) {
+          await bajarFirmas(entrega.eventId, [entrega.id]);
+          f = await obtenerFirma(entrega.id);
+        }
+        if (vivo) setPng(f ? imagenDeFirma(f) : null);
+      } catch {
         if (vivo) setPng(null);
-      })
-      .finally(() => {
+      } finally {
         if (vivo) setCargandoFirma(false);
-      });
+      }
+    })();
     return () => {
       vivo = false;
     };
-  }, [entrega.id, obtenerFirma]);
+  }, [entrega.id, entrega.eventId, entrega.conFirma, obtenerFirma]);
 
   return (
     <Modal

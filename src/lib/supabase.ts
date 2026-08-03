@@ -550,7 +550,7 @@ async function aFilaEntrega(entrega: Delivery): Promise<Record<string, unknown>>
 
   // Una entrega que dice tener firma pero perdió el trazo no puede subirse
   // como firmada: el acta afirmaría algo que no puede mostrar.
-  const conFirmaReal = Boolean(entrega.conFirma && firma?.png);
+  const conFirmaReal = Boolean(entrega.conFirma && firma?.trazos?.some((t) => t.length > 0));
 
   return {
     id: entrega.id,
@@ -561,7 +561,9 @@ async function aFilaEntrega(entrega: Delivery): Promise<Record<string, unknown>>
     nombre_firmante: entrega.nombreFirmante,
     documento_firmante: entrega.documentoFirmante,
     con_firma: conFirmaReal,
-    firma_png: firma?.png ?? null,
+    // El PNG ya no viaja: la firma son los trazos y el reporte la
+    // redibuja. Enviarlo multiplicaba por 20 el peso de cada entrega.
+    firma_png: null,
     firma_trazos: firma?.trazos ?? null,
     firma_ancho: firma?.ancho ?? null,
     firma_alto: firma?.alto ?? null,
@@ -576,12 +578,23 @@ async function aFilaEntrega(entrega: Delivery): Promise<Record<string, unknown>>
   };
 }
 
+/* Columnas de una entrega SIN su firma. La sincronización periódica solo
+   necesita saber quién recibió qué: arrastrar los trazos en cada ciclo
+   convertía 35 MB de datos en gigabytes de transferencia. */
+const COLUMNAS_ENTREGA =
+  'id,event_id,slot_id,person_id,estado,nombre_firmante,documento_firmante,' +
+  'con_firma,firma_ancho,firma_alto,firmado_en,operador,dispositivo,sello,' +
+  'observacion,anulado_en,anulado_por,motivo_anulacion';
+
 /** Trae entregas registradas por otros puestos y las fusiona localmente. */
 export async function bajarEntregas(eventId: string): Promise<{ bajadas: number; mensaje?: string }> {
   const c = await obtenerCliente();
   if (!c) return { bajadas: 0 };
 
-  const { data, error } = await c.from('acta_deliveries').select('*').eq('event_id', eventId);
+  const { data, error } = await c
+    .from('acta_deliveries')
+    .select(COLUMNAS_ENTREGA)
+    .eq('event_id', eventId);
   if (error) return { bajadas: 0, mensaje: traducirErrorDatos(error) };
   if (!data?.length) return { bajadas: 0 };
 
@@ -590,32 +603,60 @@ export async function bajarEntregas(eventId: string): Promise<{ bajadas: number;
   const porSlotPersona = new Map(locales.map((e) => [`${e.slotId}|${e.personId}`, e]));
 
   const nuevas: Delivery[] = [];
-  const firmas: SignatureRecord[] = [];
-
-  for (const fila of data as Record<string, unknown>[]) {
+  for (const fila of data as unknown as Record<string, unknown>[]) {
     const entrega = aEntrega(fila);
     const local = porId.get(entrega.id);
     // Nunca pisamos una entrega local distinta para el mismo turno.
     if (!local && porSlotPersona.has(`${entrega.slotId}|${entrega.personId}`)) continue;
     if (local && local.estado === entrega.estado && local.sync === 'sincronizado') continue;
-
     nuevas.push(entrega);
-    const png = fila['firma_png'] as string | null;
-    if (png) {
-      firmas.push({
-        id: entrega.id,
-        eventId,
-        png,
-        trazos: (fila['firma_trazos'] as SignatureRecord['trazos']) ?? [],
-        ancho: Number(fila['firma_ancho']) || 600,
-        alto: Number(fila['firma_alto']) || 240,
-      });
-    }
   }
 
   if (nuevas.length) await db.putMany('deliveries', nuevas);
-  if (firmas.length) await db.putMany('signatures', firmas);
   return { bajadas: nuevas.length };
+}
+
+/**
+ * Descarga los trazos de firmas puntuales. Se llama solo al abrir un acta
+ * o el detalle de una entrega, y únicamente para las que este dispositivo
+ * todavía no tiene guardadas.
+ */
+export async function bajarFirmas(
+  eventId: string,
+  ids: string[],
+): Promise<{ bajadas: number; mensaje?: string }> {
+  const c = await obtenerCliente();
+  if (!c || !ids.length) return { bajadas: 0 };
+
+  const LOTE = 100;
+  let bajadas = 0;
+
+  for (let i = 0; i < ids.length; i += LOTE) {
+    const { data, error } = await c
+      .from('acta_deliveries')
+      .select('id,firma_png,firma_trazos,firma_ancho,firma_alto')
+      .in('id', ids.slice(i, i + LOTE));
+    if (error) return { bajadas, mensaje: traducirErrorDatos(error) };
+
+    const firmas: SignatureRecord[] = [];
+    for (const fila of (data ?? []) as unknown as Record<string, unknown>[]) {
+      const trazos = (fila.firma_trazos as SignatureRecord['trazos']) ?? [];
+      const png = (fila.firma_png as string | null) ?? undefined;
+      if (!trazos.length && !png) continue;
+      firmas.push({
+        id: String(fila.id),
+        eventId,
+        png,
+        trazos,
+        ancho: Number(fila.firma_ancho) || 600,
+        alto: Number(fila.firma_alto) || 240,
+      });
+    }
+    if (firmas.length) await db.putMany('signatures', firmas);
+    bajadas += firmas.length;
+  }
+
+  return { bajadas };
 }
 
 /** Suscripción realtime a las entregas del evento. Devuelve el cierre. */

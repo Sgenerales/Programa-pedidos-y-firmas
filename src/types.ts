@@ -129,9 +129,13 @@ export interface SignatureRecord {
   /** Mismo id que la Delivery. */
   id: string;
   eventId: string;
-  /** PNG en dataURL, fondo transparente. */
-  png: string;
-  /** Trazos vectoriales para re-render nítido en reportes impresos. */
+  /**
+   * PNG en dataURL. Opcional y en desuso: la firma real son los trazos.
+   * Un PNG pesa ~21 KB y solo sirve a una resolución; los mismos trazos
+   * ocupan una fracción y se redibujan nítidos a cualquier tamaño.
+   */
+  png?: string;
+  /** Trazos vectoriales. Esta es la firma. */
   trazos: Stroke[];
   /** Dimensiones del lienzo original (px CSS). */
   ancho: number;

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { Campo, Confirmar, Modal, Vacio } from '../components/ui';
 import { useStore } from '../store/useStore';
+import { imagenDeFirma } from '../components/SignaturePad';
 import { habilitadaEnTurno, matrizCobertura, resumenTurno } from '../store/selectors';
 import { reporteCompleto, respaldoJSON } from '../lib/exportar';
 import * as db from '../lib/idb';
@@ -517,7 +518,12 @@ function ActaModal({
       try {
         const todas = await db.getByIndex<SignatureRecord>('signatures', 'eventId', evento.id);
         if (!vivo) return;
-        setFirmas(new Map(todas.map((f) => [f.id, f.png])));
+        // Redibujamos de los trazos: pesan una fracción del PNG y salen
+      // nítidos a cualquier tamaño de impresión.
+      setFirmas(new Map(todas.flatMap((f) => {
+        const img = imagenDeFirma(f);
+        return img ? [[f.id, img] as [string, string]] : [];
+      })));
       } catch (err) {
         if (vivo) setErrorFirmas(msg(err));
       } finally {
