@@ -12,6 +12,9 @@ export function SyncPill({ compacto }: { compacto?: boolean }) {
   const sync = useStore((s) => s.sync);
   const sesion = useStore((s) => s.sesion);
   const sincronizar = useStore((s) => s.sincronizar);
+  const eventoId = useStore((s) => s.eventoId);
+  const eventos = useStore((s) => s.eventos);
+  const cerrado = eventos.find((e) => e.id === eventoId)?.estado === 'cerrado';
 
   // Sin nube configurada nada se respalda. Es un fallo silencioso —una
   // variable de entorno olvidada en el hosting— y tiene que verse.
@@ -26,6 +29,17 @@ export function SyncPill({ compacto }: { compacto?: boolean }) {
   if (!sesion) return null;
 
   const { pendientes, conflictos, sincronizando, enLinea, ultimaOk, ultimoError } = sync;
+
+  // Un evento cerrado no consulta nada. Decirlo evita que alguien crea
+  // que la sincronización se rompió.
+  if (cerrado && !pendientes) {
+    return (
+      <span className="syncPill" title="El evento está cerrado: no se envían ni reciben cambios">
+        <Icon name="candado" size={13} />
+        Evento cerrado
+      </span>
+    );
+  }
 
   const clase = !enLinea
     ? 'syncPill syncPill--off'

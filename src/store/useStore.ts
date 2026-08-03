@@ -549,8 +549,19 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async sincronizar(opciones) {
-    const { sesion, sync, eventoId } = get();
+    const { sesion, sync, eventoId, eventos } = get();
     if (!HAY_NUBE || !sesion || sync.sincronizando) return;
+
+    // Un evento cerrado ya no recibe entregas ni cambios de estructura:
+    // consultarlo solo gastaría transferencia. Dejamos salir lo que
+    // todavía no subió —una firma no puede quedarse afuera del reporte—
+    // y después el dispositivo queda en silencio aunque siga abierto.
+    const activo = eventos.find((e) => e.id === eventoId) ?? null;
+    const cerrado = activo?.estado === 'cerrado';
+    if (cerrado && sync.pendientes === 0 && !opciones?.forzarEstructura) {
+      set({ sync: { ...get().sync, sincronizando: false, ultimoError: null } });
+      return;
+    }
 
     set({ sync: { ...get().sync, sincronizando: true, ultimoError: null } });
 
@@ -561,7 +572,7 @@ export const useStore = create<State>((set, get) => ({
       const ahora = Date.now();
       const tocaEstructura =
         opciones?.forzarEstructura === true ||
-        ahora - ultimaConsultaEstructura > INTERVALO_ESTRUCTURA_MS;
+        (!cerrado && ahora - ultimaConsultaEstructura > INTERVALO_ESTRUCTURA_MS);
       let eventos = get().eventos;
       if (tocaEstructura) {
         ultimaConsultaEstructura = ahora;
@@ -1064,6 +1075,15 @@ export const useStore = create<State>((set, get) => ({
       slot.eventId !== eventoId
     ) {
       return { ok: false, motivo: 'error', mensaje: 'Turno o persona inválidos.' };
+    }
+
+    // Un evento cerrado esta finalizado: su acta ya no admite entregas.
+    if (get().eventos.find((e) => e.id === eventoId)?.estado === 'cerrado') {
+      return {
+        ok: false,
+        motivo: 'error',
+        mensaje: 'Este evento está cerrado. Reabrilo desde Eventos si necesitás registrar más entregas.',
+      };
     }
 
     const servicio = get().servicios.find((s) => s.id === slot.serviceId);

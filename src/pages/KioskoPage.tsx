@@ -66,8 +66,11 @@ export function KioskoPage({ onSalir }: { onSalir: () => void }) {
      escuchamos para reflejar al instante lo que registra otra tablet. */
   useEffect(() => {
     if (!HAY_NUBE || !eventoId || !sesion) return;
+    // En un evento cerrado no hay novedades que escuchar: mantener el
+    // canal abierto solo consumiría transferencia.
+    if (evento?.estado === 'cerrado') return;
     return suscribirEntregas(eventoId, () => void sincronizar({ silencioso: true }));
-  }, [eventoId, sesion, sincronizar]);
+  }, [eventoId, sesion, sincronizar, evento?.estado]);
 
   /* — Datos derivados — */
   const indice = useMemo(() => construirIndice(personas), [personas]);
