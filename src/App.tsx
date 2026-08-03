@@ -66,7 +66,14 @@ export default function App() {
     window.addEventListener('online', alVolverLaRed);
     window.addEventListener('offline', alPerderLaRed);
     document.addEventListener('visibilitychange', alVolverAlFrente);
-    const reloj = window.setInterval(() => void sincronizar({ silencioso: true }), 30_000);
+
+    // Una pestaña olvidada en segundo plano no tiene a nadie mirando, pero
+    // seguía consultando el servidor cada 30 segundos. Con la app abierta
+    // y sin evento en curso, eso solo gastaba transferencia.
+    const reloj = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void sincronizar({ silencioso: true });
+    }, 30_000);
 
     void sincronizar({ silencioso: true });
 

@@ -275,52 +275,83 @@ export interface EstructuraRemota {
   slots: Slot[];
   personas: Person[];
   eliminados: string[];
+  /**
+   * Eventos cuyo detalle viene en esta respuesta. Los que no figuran acá
+   * no cambiaron: su caché local se conserva tal cual.
+   */
+  detallados?: string[];
 }
 
-/** Descarga la estructura compartida completa. IndexedDB es solo su caché offline. */
-export async function bajarEstructuras(): Promise<EstructuraRemota> {
+/**
+ * Descarga la estructura compartida, pero solo la que cambió.
+ *
+ * La versión anterior hacía `select('*')` sobre eventos, días,
+ * servicios, turnos y TODO el padrón en cada ciclo de sincronización.
+ * Con 173 personas eran 83 kB cada 30 segundos: 235 MB por día y por
+ * dispositivo con la app simplemente abierta, incluso sin evento en
+ * curso. Anulaba por completo la sincronización incremental de entregas.
+ *
+ * Ahora se piden primero los eventos —una fila por evento, unos pocos
+ * kB— y el detalle solo de aquellos cuya marca `actualizado_en` difiere
+ * de la que este dispositivo ya tiene.
+ */
+export async function bajarEstructuras(
+  conocidos: Record<string, string> = {},
+): Promise<EstructuraRemota> {
+  const vacio: EstructuraRemota = {
+    eventos: [], dias: [], servicios: [], slots: [], personas: [], eliminados: [],
+  };
   const c = await obtenerCliente();
-  if (!c) {
-    return { eventos: [], dias: [], servicios: [], slots: [], personas: [], eliminados: [] };
-  }
+  if (!c) return vacio;
 
-  const resultados = await Promise.all([
+  const [resEventos, resBorrados] = await Promise.all([
     c.from('acta_events').select('*'),
-    c.from('acta_days').select('*'),
-    c.from('acta_services').select('*'),
-    c.from('acta_slots').select('*'),
-    c.from('acta_people').select('*'),
     c.from('acta_event_tombstones').select('event_id'),
   ]);
-  const tablas = [
-    'acta_events',
-    'acta_days',
-    'acta_services',
-    'acta_slots',
-    'acta_people',
-    'acta_event_tombstones',
-  ];
-  for (let i = 0; i < resultados.length; i++) {
-    const error = resultados[i].error;
-    if (error) throw new Error(`${tablas[i]}: ${traducirErrorDatos(error)}`);
+  if (resEventos.error) throw new Error(`acta_events: ${traducirErrorDatos(resEventos.error)}`);
+  if (resBorrados.error) {
+    throw new Error(`acta_event_tombstones: ${traducirErrorDatos(resBorrados.error)}`);
   }
 
-  const eventos = (resultados[0].data ?? [])
+  const eventos = (resEventos.data ?? [])
     .map((fila) => aEvento(fila as Record<string, unknown>))
     .sort((a, b) => b.actualizadoEn.localeCompare(a.actualizadoEn));
+  const eliminados = (resBorrados.data ?? []).map((fila) => String(fila.event_id));
+
+  // Solo bajamos el detalle de lo que este dispositivo no tiene al día.
+  const desactualizados = eventos
+    .filter((evento) => conocidos[evento.id] !== evento.actualizadoEn)
+    .map((evento) => evento.id);
+
+  if (!desactualizados.length) {
+    return { eventos, dias: [], servicios: [], slots: [], personas: [], eliminados };
+  }
+
+  const [resDias, resServicios, resSlots, resPersonas] = await Promise.all([
+    c.from('acta_days').select('*').in('event_id', desactualizados),
+    c.from('acta_services').select('*').in('event_id', desactualizados),
+    c.from('acta_slots').select('*').in('event_id', desactualizados),
+    c.from('acta_people').select('*').in('event_id', desactualizados),
+  ]);
+  for (const [tabla, r] of [
+    ['acta_days', resDias],
+    ['acta_services', resServicios],
+    ['acta_slots', resSlots],
+    ['acta_people', resPersonas],
+  ] as const) {
+    if (r.error) throw new Error(`${tabla}: ${traducirErrorDatos(r.error)}`);
+  }
 
   return {
     eventos,
-    dias: (resultados[1].data ?? []).map((fila) => aDia(fila as Record<string, unknown>)),
-    servicios: (resultados[2].data ?? []).map((fila) =>
-      aServicio(fila as Record<string, unknown>),
-    ),
-    slots: (resultados[3].data ?? []).map((fila) => aSlot(fila as Record<string, unknown>)),
-    personas: (resultados[4].data ?? []).map((fila) =>
-      aPersona(fila as Record<string, unknown>),
-    ),
-    eliminados: (resultados[5].data ?? []).map((fila) => String(fila.event_id)),
-  };
+    dias: (resDias.data ?? []).map((f) => aDia(f as Record<string, unknown>)),
+    servicios: (resServicios.data ?? []).map((f) => aServicio(f as Record<string, unknown>)),
+    slots: (resSlots.data ?? []).map((f) => aSlot(f as Record<string, unknown>)),
+    personas: (resPersonas.data ?? []).map((f) => aPersona(f as Record<string, unknown>)),
+    /** Ids cuyo detalle sí viene en esta respuesta. El resto queda intacto. */
+    eliminados,
+    detallados: desactualizados,
+  } as EstructuraRemota;
 }
 
 /** Elimina el evento remoto y verifica que RLS haya autorizado el borrado. */

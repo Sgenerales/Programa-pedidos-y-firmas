@@ -97,6 +97,11 @@ const HUELLAS_KEY = 'acta.estructuraPublicada';
 /* Hasta dónde bajó ya cada evento. Sin esto, cada ciclo de
    sincronización volvería a descargar el evento completo. */
 const MARCAS_KEY = 'acta.marcaSync';
+/* La estructura de un evento cambia rara vez —al armarlo o al importar
+   el padrón—, mientras que las entregas cambian todo el tiempo. No tiene
+   sentido preguntar por ella en cada ciclo de 30 segundos. */
+const INTERVALO_ESTRUCTURA_MS = 5 * 60_000;
+let ultimaConsultaEstructura = 0;
 
 function leerHuellas(): Record<string, string> {
   try {
@@ -112,6 +117,29 @@ function leerMarcas(): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+/**
+ * Qué versión de cada evento tiene realmente este dispositivo.
+ *
+ * Se deriva de IndexedDB, no de una clave paralela en localStorage: si
+ * las dos fuentes se separan —caché borrada, almacenamiento lleno— el
+ * dispositivo podría declarar que está al día sin tener el padrón, y la
+ * reconciliación lo sobreescribiría con listas vacías.
+ *
+ * Un evento sin jornadas o sin personas no cuenta como conocido: se pide
+ * su detalle de nuevo.
+ */
+async function versionesLocales(eventos: EventRecord[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const evento of eventos) {
+    const [dias, personas] = await Promise.all([
+      db.getByIndex<EventDay>('days', 'eventId', evento.id),
+      db.getByIndex<Person>('people', 'eventId', evento.id),
+    ]);
+    if (dias.length || personas.length) out[evento.id] = evento.actualizadoEn;
+  }
+  return out;
 }
 
 function guardarMarca(eventId: string, marca: string): void {
@@ -247,7 +275,10 @@ async function reemplazarColeccionLocal<T extends { id: string; eventId: string 
 async function reconciliarEstructurasRemotas(
   eventosLocales: EventRecord[],
 ): Promise<EventRecord[]> {
-  const remota = await bajarEstructuras();
+  const remota = await bajarEstructuras(await versionesLocales(eventosLocales));
+  // Los eventos que no vinieron con detalle no cambiaron: su caché local
+  // se conserva. Pisarla con arreglos vacíos borraría el padrón entero.
+  const conDetalle = remota.detallados ? new Set(remota.detallados) : null;
   const locales = new Map(eventosLocales.map((evento) => [evento.id, evento]));
   const eliminados = new Set(remota.eliminados);
   const huellas = leerHuellas();
@@ -261,6 +292,15 @@ async function reconciliarEstructurasRemotas(
   for (const eventoRemoto of remota.eventos) {
     if (eliminados.has(eventoRemoto.id)) continue;
     const local = locales.get(eventoRemoto.id);
+
+    if (conDetalle && !conDetalle.has(eventoRemoto.id)) {
+      // Sin novedades: conservamos la caché local intacta. Y si no hay
+      // copia local, tampoco escribimos: un evento vacío sería peor.
+      if (local) resultado.push(local);
+      locales.delete(eventoRemoto.id);
+      continue;
+    }
+
     const datosRemotos: DatosEvento = {
       evento: eventoRemoto,
       dias: remota.dias.filter((fila) => fila.eventId === eventoRemoto.id),
@@ -351,7 +391,7 @@ interface State {
   entrar: (email: string, password: string) => Promise<{ ok: boolean; mensaje?: string }>;
   salir: () => Promise<void>;
   /** Sube lo pendiente y baja lo de otros puestos. Seguro de llamar seguido. */
-  sincronizar: (opciones?: { silencioso?: boolean }) => Promise<void>;
+  sincronizar: (opciones?: { silencioso?: boolean; forzarEstructura?: boolean }) => Promise<void>;
   refrescarPendientes: () => Promise<void>;
   setEnLinea: (v: boolean) => void;
 
@@ -518,8 +558,16 @@ export const useStore = create<State>((set, get) => ({
       // Barremos todos los eventos con entregas pendientes, no solo el
       // que está abierto. Cambiar de evento no puede dejar firmas
       // varadas fuera del reporte.
-      const eventos = await reconciliarEstructurasRemotas(get().eventos);
-      set({ eventos });
+      const ahora = Date.now();
+      const tocaEstructura =
+        opciones?.forzarEstructura === true ||
+        ahora - ultimaConsultaEstructura > INTERVALO_ESTRUCTURA_MS;
+      let eventos = get().eventos;
+      if (tocaEstructura) {
+        ultimaConsultaEstructura = ahora;
+        eventos = await reconciliarEstructurasRemotas(eventos);
+        set({ eventos });
+      }
       if (eventoId && eventos.some((evento) => evento.id === eventoId)) {
         await get().cargarEvento(eventoId);
       } else if (eventoId) {
