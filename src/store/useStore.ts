@@ -94,12 +94,33 @@ async function asegurarDiasSinEntregas(eventId: string, dayIds: Set<string>): Pr
     padrón entero en cada firma: con 170 personas y 1.500 entregas eso
     serían cientos de miles de filas y un límite de tasa asegurado. */
 const HUELLAS_KEY = 'acta.estructuraPublicada';
+/* Hasta dónde bajó ya cada evento. Sin esto, cada ciclo de
+   sincronización volvería a descargar el evento completo. */
+const MARCAS_KEY = 'acta.marcaSync';
 
 function leerHuellas(): Record<string, string> {
   try {
     return JSON.parse(localStorage.getItem(HUELLAS_KEY) ?? '{}') as Record<string, string>;
   } catch {
     return {};
+  }
+}
+
+function leerMarcas(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(MARCAS_KEY) ?? '{}') as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function guardarMarca(eventId: string, marca: string): void {
+  try {
+    const todas = leerMarcas();
+    todas[eventId] = marca;
+    localStorage.setItem(MARCAS_KEY, JSON.stringify(todas));
+  } catch {
+    /* sin almacenamiento: se rebaja a sincronización completa */
   }
 }
 
@@ -177,7 +198,14 @@ async function sincronizarEvento(
     }
   }
 
-  const bajada = enMemoria ? await bajarEntregas(eventId) : { bajadas: 0, mensaje: undefined };
+  let bajada: { bajadas: number; mensaje?: string } = { bajadas: 0 };
+  if (enMemoria) {
+    const previa = leerMarcas()[eventId] ?? null;
+    const r = await bajarEntregas(eventId, previa);
+    bajada = { bajadas: r.bajadas, mensaje: r.mensaje };
+    // Solo avanzamos la marca si la bajada no falló a medias.
+    if (!r.mensaje && r.marca && r.marca !== previa) guardarMarca(eventId, r.marca);
+  }
 
   return {
     cambios: subida.subidas + bajada.bajadas + subida.conflictos.length,

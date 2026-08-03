@@ -586,34 +586,70 @@ const COLUMNAS_ENTREGA =
   'con_firma,firma_ancho,firma_alto,firmado_en,operador,dispositivo,sello,' +
   'observacion,anulado_en,anulado_por,motivo_anulacion';
 
-/** Trae entregas registradas por otros puestos y las fusiona localmente. */
-export async function bajarEntregas(eventId: string): Promise<{ bajadas: number; mensaje?: string }> {
+/**
+ * Trae lo que cambió desde la última vez. La marca de agua la pone el
+ * servidor (`actualizado_en`), no el reloj del dispositivo, así que las
+ * tablets desincronizadas en hora no pierden registros.
+ *
+ * Un ciclo sin novedades devuelve cero filas y cuesta unos cientos de
+ * bytes. Antes se descargaba el evento entero cada 30 segundos: con
+ * 18.000 entregas eso eran 11 MB por ciclo y decenas de GB por día.
+ */
+export async function bajarEntregas(
+  eventId: string,
+  desde: string | null,
+): Promise<{ bajadas: number; marca: string | null; mensaje?: string }> {
   const c = await obtenerCliente();
-  if (!c) return { bajadas: 0 };
+  if (!c) return { bajadas: 0, marca: desde };
 
-  const { data, error } = await c
-    .from('acta_deliveries')
-    .select(COLUMNAS_ENTREGA)
-    .eq('event_id', eventId);
-  if (error) return { bajadas: 0, mensaje: traducirErrorDatos(error) };
-  if (!data?.length) return { bajadas: 0 };
+  const PAGINA = 500;
+  /* Margen contra filas confirmadas mientras corría la consulta anterior:
+     re-leemos unos pocos registros a cambio de no perder ninguno. */
+  const MARGEN_MS = 2000;
 
-  const locales = await db.getByIndex<Delivery>('deliveries', 'eventId', eventId);
-  const porId = new Map(locales.map((e) => [e.id, e]));
-  const porSlotPersona = new Map(locales.map((e) => [`${e.slotId}|${e.personId}`, e]));
+  let cursor = desde ? new Date(Date.parse(desde) - MARGEN_MS).toISOString() : null;
+  let marcaMaxima = desde;
+  let bajadas = 0;
 
-  const nuevas: Delivery[] = [];
-  for (const fila of data as unknown as Record<string, unknown>[]) {
-    const entrega = aEntrega(fila);
-    const local = porId.get(entrega.id);
-    // Nunca pisamos una entrega local distinta para el mismo turno.
-    if (!local && porSlotPersona.has(`${entrega.slotId}|${entrega.personId}`)) continue;
-    if (local && local.estado === entrega.estado && local.sync === 'sincronizado') continue;
-    nuevas.push(entrega);
+  for (let pagina = 0; pagina < 200; pagina++) {
+    let consulta = c
+      .from('acta_deliveries')
+      .select(`${COLUMNAS_ENTREGA},actualizado_en`)
+      .eq('event_id', eventId)
+      .order('actualizado_en', { ascending: true })
+      .limit(PAGINA);
+    if (cursor) consulta = consulta.gt('actualizado_en', cursor);
+
+    const { data, error } = await consulta;
+    if (error) return { bajadas, marca: marcaMaxima, mensaje: traducirErrorDatos(error) };
+    if (!data?.length) break;
+
+    const filas = data as unknown as Record<string, unknown>[];
+    const locales = await db.getByIndex<Delivery>('deliveries', 'eventId', eventId);
+    const porId = new Map(locales.map((e) => [e.id, e]));
+    const porSlotPersona = new Map(locales.map((e) => [`${e.slotId}|${e.personId}`, e]));
+
+    const nuevas: Delivery[] = [];
+    for (const fila of filas) {
+      const entrega = aEntrega(fila);
+      const local = porId.get(entrega.id);
+      // Nunca pisamos una entrega local distinta para el mismo turno.
+      if (!local && porSlotPersona.has(`${entrega.slotId}|${entrega.personId}`)) continue;
+      if (local && local.estado === entrega.estado && local.sync === 'sincronizado') continue;
+      nuevas.push(entrega);
+    }
+
+    if (nuevas.length) await db.putMany('deliveries', nuevas);
+    bajadas += nuevas.length;
+
+    const ultima = String(filas[filas.length - 1].actualizado_en ?? '');
+    if (ultima && (!marcaMaxima || ultima > marcaMaxima)) marcaMaxima = ultima;
+
+    if (filas.length < PAGINA) break;
+    cursor = ultima;
   }
 
-  if (nuevas.length) await db.putMany('deliveries', nuevas);
-  return { bajadas: nuevas.length };
+  return { bajadas, marca: marcaMaxima };
 }
 
 /**

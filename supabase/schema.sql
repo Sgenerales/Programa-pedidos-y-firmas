@@ -232,6 +232,43 @@ begin
     check (estado in ('borrador', 'activo', 'cerrado'));
 end $$;
 
+-- ── Sincronización incremental ─────────────────────────────────────
+-- Sin esto cada dispositivo descarga el evento entero en cada ciclo:
+-- con 18.000 entregas y tres tablets son decenas de GB de egress por
+-- día. Con la marca de agua, un ciclo sin novedades no devuelve filas.
+alter table public.acta_deliveries
+  add column if not exists actualizado_en timestamptz not null default now();
+
+create index if not exists acta_deliveries_sync_idx
+  on public.acta_deliveries (event_id, actualizado_en);
+
+create or replace function public.acta_touch_delivery()
+returns trigger
+language plpgsql
+as $$
+begin
+  if tg_op = 'INSERT' then
+    new.actualizado_en := now();
+  elsif new is distinct from old then
+    new.actualizado_en := now();
+  else
+    -- Upsert idéntico: no movemos la marca, así los demás dispositivos
+    -- no vuelven a descargar una fila que en realidad no cambió.
+    new.actualizado_en := old.actualizado_en;
+  end if;
+  return new;
+end
+$$;
+
+-- El prefijo zz no es decorativo: los triggers BEFORE se disparan en
+-- orden alfabético y éste TIENE que correr después de
+-- acta_deliveries_protect_update, que autoriza comparando new con old.
+-- Si tocáramos la fila antes, todo upsert idempotente sería rechazado.
+drop trigger if exists zz_acta_deliveries_touch on public.acta_deliveries;
+create trigger zz_acta_deliveries_touch
+  before insert or update on public.acta_deliveries
+  for each row execute function public.acta_touch_delivery();
+
 -- Realtime -------------------------------------------------------------------
 
 do $$
