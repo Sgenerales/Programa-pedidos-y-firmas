@@ -108,6 +108,35 @@ de cada subida, así que nunca hay entregas rebotando por clave foránea. El
 indicador de la barra superior dice en todo momento cuántas quedan sin subir, y en
 Ajustes hay un botón que cuenta las confirmadas directamente en Postgres.
 
+### Cuándo sincroniza, y cuándo duerme
+
+La app no consulta el servidor las 24 horas. La regla va de lo específico
+a lo general:
+
+1. **Evento cerrado** → no consulta nada, nunca.
+2. **Hoy no es día de evento** → no consulta nada.
+3. **Los turnos tienen horario** → despierta desde el primer servicio
+   hasta el último, con 45 minutos de margen a cada lado. Un evento con
+   desayuno de 8 a 10 y almuerzo de 12 a 14 sincroniza de 07:15 a 14:45.
+4. **Sin horarios cargados** → jornada por defecto de 07:00 a 23:59.
+
+Dormir evita *preguntar*, nunca impide *guardar*: si quedan entregas sin
+subir, se envían igual aunque el turno haya terminado. Una firma no puede
+quedarse fuera del reporte porque se hizo tarde.
+
+El ciclo también se detiene con la pestaña en segundo plano, y volver a
+mirarla fuerza una sincronización. El indicador de la barra dice «En
+pausa» con la hora de reanudación, y tocándolo se sincroniza igual.
+
+Esto existe porque la versión anterior consumía 235 MB por día y por
+dispositivo con la app simplemente abierta, sin nadie operando.
+
+Las reglas horarias están cubiertas por pruebas:
+
+```bash
+npm test
+```
+
 ### Puesta en marcha
 
 1. Ejecutá `supabase/migrations/` en el SQL Editor (o `schema.sql`, son idénticos).

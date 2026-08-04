@@ -2,6 +2,7 @@ import { Icon } from './Icon';
 import { useStore } from '../store/useStore';
 import { HAY_NUBE } from '../lib/config';
 import { hora } from '../lib/util';
+import { describirActividad, estadoActividad } from '../lib/actividad';
 
 /**
  * Estado de la cola hacia la nube. Está siempre a la vista porque la
@@ -14,7 +15,8 @@ export function SyncPill({ compacto }: { compacto?: boolean }) {
   const sincronizar = useStore((s) => s.sincronizar);
   const eventoId = useStore((s) => s.eventoId);
   const eventos = useStore((s) => s.eventos);
-  const cerrado = eventos.find((e) => e.id === eventoId)?.estado === 'cerrado';
+  const dias = useStore((s) => s.dias);
+  const slots = useStore((s) => s.slots);
 
   // Sin nube configurada nada se respalda. Es un fallo silencioso —una
   // variable de entorno olvidada en el hosting— y tiene que verse.
@@ -30,14 +32,27 @@ export function SyncPill({ compacto }: { compacto?: boolean }) {
 
   const { pendientes, conflictos, sincronizando, enLinea, ultimaOk, ultimoError } = sync;
 
-  // Un evento cerrado no consulta nada. Decirlo evita que alguien crea
-  // que la sincronización se rompió.
-  if (cerrado && !pendientes) {
+  // Fuera de la ventana operativa no se consulta nada. Decirlo, y decir
+  // hasta cuándo, evita que alguien crea que la sincronización se rompió.
+  const actividad = estadoActividad({
+    evento: eventos.find((e) => e.id === eventoId) ?? null,
+    dias,
+    slots,
+  });
+  if (!actividad.activo && !pendientes && !sincronizando) {
     return (
-      <span className="syncPill" title="El evento está cerrado: no se envían ni reciben cambios">
-        <Icon name="candado" size={13} />
-        Evento cerrado
-      </span>
+      <button
+        className="syncPill"
+        title={`${describirActividad(actividad)} Tocá para sincronizar igual.`}
+        onClick={() => void sincronizar({ forzar: true })}
+      >
+        <Icon name={actividad.motivo === 'evento-cerrado' ? 'candado' : 'reloj'} size={13} />
+        {actividad.motivo === 'evento-cerrado'
+          ? 'Evento cerrado'
+          : compacto
+            ? 'En pausa'
+            : `En pausa${actividad.ventana ? ` · reanuda ${actividad.ventana.desde}` : ''}`}
+      </button>
     );
   }
 

@@ -172,6 +172,8 @@ export interface Miembro {
 
 /** Estado del motor de sincronización, para mostrarlo en la interfaz. */
 export interface EstadoSync {
+  /** Ventana operativa vigente. Null hasta el primer ciclo. */
+  actividad?: import('./lib/actividad').EstadoActividad | null;
   /** Entregas firmadas que todavía no están confirmadas en la nube. */
   pendientes: number;
   /** Entregas que otro puesto ya había registrado. Requieren revisión. */

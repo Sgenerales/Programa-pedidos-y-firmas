@@ -11,6 +11,7 @@ import {
 import { compararServiciosOperativos, PLANTILLAS_SERVICIO } from '../lib/catalogo';
 import { compararPersonas } from './selectors';
 import { HAY_NUBE } from '../lib/config';
+import { estadoActividad } from '../lib/actividad';
 import {
   anularEntregaEnNube,
   bajarEstructuras,
@@ -391,7 +392,8 @@ interface State {
   entrar: (email: string, password: string) => Promise<{ ok: boolean; mensaje?: string }>;
   salir: () => Promise<void>;
   /** Sube lo pendiente y baja lo de otros puestos. Seguro de llamar seguido. */
-  sincronizar: (opciones?: { silencioso?: boolean; forzarEstructura?: boolean }) => Promise<void>;
+  /** `forzar` ignora la ventana de actividad: acciones explícitas del usuario. */
+  sincronizar: (opciones?: { silencioso?: boolean; forzarEstructura?: boolean; forzar?: boolean }) => Promise<void>;
   refrescarPendientes: () => Promise<void>;
   setEnLinea: (v: boolean) => void;
 
@@ -552,14 +554,20 @@ export const useStore = create<State>((set, get) => ({
     const { sesion, sync, eventoId, eventos } = get();
     if (!HAY_NUBE || !sesion || sync.sincronizando) return;
 
-    // Un evento cerrado ya no recibe entregas ni cambios de estructura:
-    // consultarlo solo gastaría transferencia. Dejamos salir lo que
-    // todavía no subió —una firma no puede quedarse afuera del reporte—
-    // y después el dispositivo queda en silencio aunque siga abierto.
-    const activo = eventos.find((e) => e.id === eventoId) ?? null;
-    const cerrado = activo?.estado === 'cerrado';
-    if (cerrado && sync.pendientes === 0 && !opciones?.forzarEstructura) {
-      set({ sync: { ...get().sync, sincronizando: false, ultimoError: null } });
+    // Fuera de la ventana operativa no hay nada que preguntar: evento
+    // cerrado, día sin jornada, o madrugada. Consultar igual solo
+    // gastaría transferencia durante horas en que nadie opera.
+    //
+    // Lo pendiente sí sale siempre: dormir evita *preguntar*, nunca
+    // impide guardar. Una firma no puede quedarse fuera del reporte
+    // porque el turno haya terminado.
+    const evento = eventos.find((e) => e.id === eventoId) ?? null;
+    const actividad = estadoActividad({ evento, dias: get().dias, slots: get().slots });
+    const dormido = !actividad.activo;
+    if (dormido && sync.pendientes === 0 && !opciones?.forzar) {
+      set({
+        sync: { ...get().sync, sincronizando: false, ultimoError: null, actividad },
+      });
       return;
     }
 
@@ -572,7 +580,8 @@ export const useStore = create<State>((set, get) => ({
       const ahora = Date.now();
       const tocaEstructura =
         opciones?.forzarEstructura === true ||
-        (!cerrado && ahora - ultimaConsultaEstructura > INTERVALO_ESTRUCTURA_MS);
+        opciones?.forzar === true ||
+        (!dormido && ahora - ultimaConsultaEstructura > INTERVALO_ESTRUCTURA_MS);
       let eventos = get().eventos;
       if (tocaEstructura) {
         ultimaConsultaEstructura = ahora;
@@ -618,6 +627,7 @@ export const useStore = create<State>((set, get) => ({
         sync: {
           ...get().sync,
           sincronizando: false,
+          actividad,
           ultimoError: vencida ? error!.slice(SESION_VENCIDA.length + 2) : error,
           ultimaOk: error ? get().sync.ultimaOk : new Date().toISOString(),
         },

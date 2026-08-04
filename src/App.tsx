@@ -59,8 +59,12 @@ export default function App() {
 
     const alVolverLaRed = () => setEnLinea(true);
     const alPerderLaRed = () => setEnLinea(false);
+    // Volver a mirar la pantalla es una acción del usuario: ahí sí vale
+    // consultar aunque estemos fuera de la ventana operativa.
     const alVolverAlFrente = () => {
-      if (document.visibilityState === 'visible') void sincronizar({ silencioso: true });
+      if (document.visibilityState === 'visible') {
+        void sincronizar({ silencioso: true, forzar: true });
+      }
     };
 
     window.addEventListener('online', alVolverLaRed);

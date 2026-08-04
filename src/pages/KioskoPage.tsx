@@ -16,6 +16,7 @@ import {
 } from '../store/selectors';
 import { suscribirEntregas, bajarFirmas } from '../lib/supabase';
 import { HAY_NUBE } from '../lib/config';
+import { estadoActividad } from '../lib/actividad';
 import { SyncPill } from '../components/SyncPill';
 import { fechaCorta, hora, hoyISO, iniciales, norm, pct } from '../lib/util';
 import type { Delivery, PersonRow, Slot } from '../types';
@@ -66,11 +67,11 @@ export function KioskoPage({ onSalir }: { onSalir: () => void }) {
      escuchamos para reflejar al instante lo que registra otra tablet. */
   useEffect(() => {
     if (!HAY_NUBE || !eventoId || !sesion) return;
-    // En un evento cerrado no hay novedades que escuchar: mantener el
-    // canal abierto solo consumiría transferencia.
-    if (evento?.estado === 'cerrado') return;
+    // Fuera de la ventana operativa no hay novedades que escuchar, y un
+    // canal abierto toda la noche consume igual.
+    if (!estadoActividad({ evento, dias, slots }).activo) return;
     return suscribirEntregas(eventoId, () => void sincronizar({ silencioso: true }));
-  }, [eventoId, sesion, sincronizar, evento?.estado]);
+  }, [eventoId, sesion, sincronizar, evento, dias, slots]);
 
   /* — Datos derivados — */
   const indice = useMemo(() => construirIndice(personas), [personas]);
